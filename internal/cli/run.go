@@ -2,8 +2,8 @@
 package cli
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,11 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wipe-me/cli/internal/api"
-	"github.com/wipe-me/cli/internal/base58"
 	"github.com/wipe-me/cli/internal/clipboard"
-	"github.com/wipe-me/cli/internal/envelope"
 	"github.com/wipe-me/cli/internal/media"
+	"github.com/wipe-me/sdk/go/wipeme"
 )
 
 const (
@@ -95,7 +93,7 @@ type creatorReceipt struct {
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
 	var err error
 	if len(args) > 0 && args[0] == "delete" {
-		err = runDelete(args[1:], stdin, stdout, stderr, version)
+		err = runDelete(args[1:], stdin, stdout, stderr)
 	} else {
 		err = run(args, stdin, stdout, stderr, version)
 	}
@@ -147,39 +145,40 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		files = append(files, file)
 	}
 
-	messageID, err := base58.RandomString(rand.Reader, 12)
+	messageID, err := wipeme.GenerateMessageID()
 	if err != nil {
 		return fmt.Errorf("generate message ID: %w", err)
 	}
-	secret, err := base58.RandomString(rand.Reader, 16)
+	secret, err := wipeme.GenerateSecret()
 	if err != nil {
 		return fmt.Errorf("generate link secret: %w", err)
 	}
-	temporary, err := os.CreateTemp("", "wipeme-*.wme")
+	attachments, closeAttachments, err := openAttachments(files)
 	if err != nil {
-		return fmt.Errorf("create encrypted temporary file: %w", err)
+		return err
 	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("secure encrypted temporary file: %w", err)
-	}
-	encrypted, err := envelope.Write(temporary, messageID, message, secret, files, envelope.WriteOptions{})
+	defer closeAttachments()
+	progress := interactiveProgress(stderr, settings.JSON)
+	var envelope bytes.Buffer
+	encrypted, err := wipeme.EncryptWithOptions(&envelope, messageID, secret, message, attachments, wipeme.CryptoOptions{Progress: progress})
 	if err != nil {
 		return err
 	}
 	defer wipe(encrypted.DeletionKey[:])
-	info, err := temporary.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect encrypted envelope: %w", err)
-	}
 
-	client := newAPIClient(settings.APIEndpoint, version)
+	client, err := newAPIClient(settings.APIEndpoint)
+	if err != nil {
+		return err
+	}
 	expiresAt := time.Now().Add(settings.Expires)
-	created, err := client.Create(context.Background(), messageID, temporary, info.Size(), expiresAt, encrypted.DeletionKey[:])
+	created, err := client.CreateMessage(context.Background(), wipeme.CreateMessageRequest{
+		MessageID:   messageID,
+		Envelope:    envelope.Bytes(),
+		ContentHash: encrypted.ContentHash,
+		DeletionKey: encrypted.DeletionKeyHeader,
+		ExpiresAt:   expiresAt,
+		Progress:    progress,
+	})
 	if err != nil {
 		return err
 	}
@@ -188,7 +187,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		return err
 	}
 	if settings.Receipt != "" {
-		receipt := creatorReceipt{CipherVersion: envelope.Version, URL: link, MessageID: messageID, Secret: secret, ExpiresAt: expiresAt}
+		receipt := creatorReceipt{CipherVersion: wipeme.ProtocolVersion, URL: link, MessageID: messageID, Secret: secret, ExpiresAt: expiresAt}
 		if err := writeReceipt(settings.Receipt, receipt); err != nil {
 			return fmt.Errorf("message was created at %s, but the creator receipt could not be saved: %w", link, err)
 		}
@@ -206,6 +205,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	_, err = fmt.Fprintln(stdout, link)
 	return err
+}
+
+func interactiveProgress(stderr io.Writer, jsonMode bool) wipeme.ProgressFunc {
+	file, ok := stderr.(*os.File)
+	if jsonMode || !ok {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return nil
+	}
+	return func(event wipeme.Progress) {
+		label := strings.ToUpper(event.Phase[:1]) + event.Phase[1:]
+		fmt.Fprintf(stderr, "\r%s %d%%", label, event.Percent)
+		if event.Percent == 100 {
+			fmt.Fprintln(stderr)
+		}
+	}
 }
 
 func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
@@ -245,7 +262,7 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	return settings, flags.Args(), nil
 }
 
-func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) error {
+func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("wipeme delete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	apiEndpoint := envOrDefault("WIPEME_API_URL", defaultAPI)
@@ -280,13 +297,21 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer, version
 	if err != nil {
 		return err
 	}
-	deletionKey, err := envelope.DeriveDeletionKey(messageID, secret)
+	deletionKey, err := wipeme.DeriveDeletionKey(messageID, secret)
 	if err != nil {
 		return err
 	}
 	defer wipe(deletionKey[:])
-	if err := newAPIClient(apiEndpoint, version).Delete(context.Background(), messageID, deletionKey[:]); err != nil {
+	client, err := newAPIClient(apiEndpoint)
+	if err != nil {
 		return err
+	}
+	deleted, err := client.DeleteMessage(context.Background(), messageID, wipeme.DeletionKeyHeader(deletionKey))
+	if err != nil {
+		return err
+	}
+	if !deleted.Deleted {
+		return fmt.Errorf("API returned an invalid deletion response")
 	}
 	if jsonResult {
 		return json.NewEncoder(stdout).Encode(map[string]any{"deleted": true, "message_id": messageID})
@@ -346,7 +371,7 @@ func collectInput(stdin io.Reader, stderr io.Writer, settings config, paths *[]s
 		if len(*paths) > 0 {
 			return "", "", nil, nil
 		}
-		fmt.Fprintln(stderr, "Enter message, then press Ctrl-D:")
+		fmt.Fprintln(stderr, "Enter a private message. Press Ctrl-D on an empty line when finished:")
 	}
 	data, err := io.ReadAll(stdin)
 	if err != nil {
@@ -360,10 +385,9 @@ func buildLink(site, messageID, secret string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid --site-url %q", site)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + base58.Group(messageID, 4)
 	parsed.RawQuery = ""
-	parsed.Fragment = base58.Group(secret, 4)
-	return parsed.String(), nil
+	parsed.Fragment = ""
+	return wipeme.FormatPrivateLink(parsed.String(), messageID, secret)
 }
 
 func parsePrivateLink(privateLink string) (string, string, error) {
@@ -371,29 +395,50 @@ func parsePrivateLink(privateLink string) (string, string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", "", fmt.Errorf("invalid private link")
 	}
-	path := strings.Trim(parsed.Path, "/")
-	if separator := strings.LastIndexByte(path, '/'); separator >= 0 {
-		path = path[separator+1:]
-	}
-	messageID, err := base58.Normalize(path, 12)
+	messageID, secret, err := wipeme.ParsePrivateLink(privateLink)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid message ID in private link: %w", err)
-	}
-	secret, err := base58.Normalize(parsed.Fragment, 16)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid secret in private link: %w", err)
+		return "", "", fmt.Errorf("invalid private link: %w", err)
 	}
 	return messageID, secret, nil
 }
 
-func newAPIClient(endpoint, version string) api.Client {
-	return api.Client{
-		Endpoint: endpoint,
+func newAPIClient(endpoint string) (*wipeme.Client, error) {
+	baseURL := strings.TrimSuffix(strings.TrimRight(endpoint, "/"), "/api/messages")
+	return wipeme.NewClient(wipeme.ClientOptions{
+		BaseURL:  baseURL,
+		ClientID: "cli",
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Minute,
 		},
-		UserAgent: "wipeme/" + version,
+	})
+}
+
+func openAttachments(files []media.File) ([]wipeme.AttachmentInput, func(), error) {
+	handles := make([]*os.File, 0, len(files))
+	closeAll := func() {
+		for _, handle := range handles {
+			_ = handle.Close()
+		}
 	}
+	attachments := make([]wipeme.AttachmentInput, 0, len(files))
+	for _, file := range files {
+		handle, err := os.Open(file.Path)
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("open attachment %q: %w", file.Path, err)
+		}
+		handles = append(handles, handle)
+		attachments = append(attachments, wipeme.AttachmentInput{
+			Reader: handle,
+			Name:   file.Name,
+			Type:   file.Type,
+			Kind:   file.Kind,
+			Size:   file.Size,
+			Width:  file.Width,
+			Height: file.Height,
+		})
+	}
+	return attachments, closeAll, nil
 }
 
 func writeReceipt(path string, receipt creatorReceipt) error {

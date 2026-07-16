@@ -3,7 +3,10 @@
 Create private, one-time [wipe.me](https://wipe.me) links from your terminal—text, files, images, audio, and more.
 
 ```console
-$ printf '%s' 'Meet me at 9' | wipeme
+$ wipeme
+Enter a private message. Press Ctrl-D on an empty line when finished:
+Meet me at 9
+<Ctrl-D>
 https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
 ```
 
@@ -14,38 +17,81 @@ https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
 
 ## Usage
 
-Standard input is the optional message; positional paths are attachments:
+### Interactive
+
+Run `wipeme` and enter a multiline private message. Press Ctrl-D on an empty line when finished:
+
+```console
+$ wipeme --expires 1h
+Enter a private message. Press Ctrl-D on an empty line when finished:
+Temporary credentials
+<Ctrl-D>
+https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
+```
+
+The message is read from the terminal rather than a command argument, so its contents are not added to shell history.
+
+### Attachments
 
 ```sh
-# Text
-printf '%s' 'The password is swordfish' | wipeme
-
 # One attachment
 wipeme screenshot.png
 
-# Text plus multiple attachments
-printf '%s' 'Here are the files' | wipeme photo.jpg recording.m4a report.pdf
+# Multiple attachments
+wipeme photo.jpg recording.m4a report.pdf
+
+# Message from a file plus attachments
+wipeme --message-file note.txt photo.jpg recording.m4a
 
 # Treat stdin as an attachment instead of a message
 generate-report | wipeme --attach - --name report.pdf --type application/pdf
+```
 
-# Expire if unopened
-printf '%s' 'Temporary credentials' | wipeme --expires 1h
+Positional paths are attachments. Standard input is the message unless `--attach -` explicitly treats it as a file.
 
-# Copy without printing the link
-printf '%s' 'Private note' | wipeme --copy
+### Automation and pipelines
 
-# Machine-readable output
-printf '%s' 'Private note' | wipeme --json
+`wipeme` composes with commands that produce secrets or private content:
+
+```sh
+# Existing file as the message
+wipeme < private-note.txt
+
+# Secret produced by another command
+password-manager read service/account | wipeme --expires 1h
+
+# Existing shell variable; the value itself is not written into shell history
+printf '%s' "$SECRET" | wipeme --expires 1h
+
+# Piped message plus attachments
+printf '%s' "$NOTE" | wipeme photo.jpg recording.m4a
+```
+
+Avoid putting literal secrets in command arguments or pipeline commands. Both of these may expose the value through shell history or process inspection:
+
+```sh
+# Avoid
+wipeme --message 'literal secret'
+printf '%s' 'literal secret' | wipeme
+```
+
+### Output and management
+
+```sh
+# Copy the link without printing it
+wipeme --copy
+
+# Machine-readable creation result
+wipeme --json
 
 # Save an explicit creator receipt with mode 0600
-printf '%s' 'Private note' | wipeme --receipt ./private-note.receipt.json
+wipeme --receipt ./private-note.receipt.json
 
 # Anyone holding the complete link can delete the message
 printf '%s' "$PRIVATE_LINK" | wipeme delete
 ```
 
-Run `wipeme --help` for all options. Avoid `--message` for sensitive values because command arguments may be saved in shell history or exposed to process inspection.
+Run `wipeme --help` or `wipeme delete --help` for the complete command reference.
 
 ## Installation
 
@@ -71,8 +117,14 @@ https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
 - AES-256-GCM encrypts the manifest and independently authenticates 4 MiB chunks
 - Filenames, messages, MIME types, media classification, dimensions, and sizes are encrypted
 
-The exact interoperable format is specified in [docs/protocol-v1.md](docs/protocol-v1.md).
-The corresponding server and browser contract is in [docs/backend-v1-handoff.md](docs/backend-v1-handoff.md).
+The reusable [Wipe.me SDK](https://github.com/wipe-me/sdk) owns the cryptographic
+implementation and canonical [protocol v1 specification](https://github.com/wipe-me/sdk/blob/main/specification/protocol-v1.md).
+The CLI adds terminal input, local media inspection, receipts, and output behavior
+on top of the Go SDK. Backend integration notes are in
+[docs/backend-v1-handoff.md](docs/backend-v1-handoff.md).
+
+Free anonymous uploads are limited to a 3 MiB encrypted envelope and a maximum expiry
+of 14 days. Every message is claimed at most once.
 
 ## Media handling
 
@@ -92,7 +144,6 @@ X-Wipe-Deletion-Key: <base64url-derived-capability>
 X-Wipe-Cipher-Version: 1
 X-Wipe-Client: cli
 X-Wipe-Expires-At: <epoch-milliseconds>
-X-Wipe-On-Read: 1
 ```
 
 Successful response:
@@ -114,6 +165,9 @@ printf '%s' 'local test' | \
 ```
 
 ## Development
+
+When stderr is an interactive terminal, the CLI reports real encryption and upload
+percentages there. JSON/stdout output and pipelines remain clean.
 
 ```sh
 go test ./...

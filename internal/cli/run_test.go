@@ -13,8 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wipe-me/cli/internal/base58"
-	"github.com/wipe-me/cli/internal/envelope"
+	"github.com/wipe-me/sdk/go/wipeme"
 )
 
 func TestBuildLink(t *testing.T) {
@@ -51,7 +50,7 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 		if request.Method != http.MethodPut || request.Header.Get("X-Wipe-Deletion-Key") == "" || request.Header.Get("X-Wipe-Cipher-Version") != "1" || request.Header.Get("X-Wipe-Client") != "cli" {
 			t.Errorf("unexpected create request: %s %#v", request.Method, request.Header)
 		}
-		uploadedID = strings.TrimPrefix(request.URL.Path, "/")
+		uploadedID = strings.TrimPrefix(request.URL.Path, "/api/messages/")
 		var err error
 		uploaded, err = io.ReadAll(request.Body)
 		if err != nil {
@@ -64,7 +63,7 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	receiptPath := filepath.Join(t.TempDir(), "creator.json")
-	code := Run([]string{"--api-url", server.URL, "--site-url", "https://wipe.me", "--receipt", receiptPath}, strings.NewReader("private message"), &stdout, &stderr, "test")
+	code := Run([]string{"--api-url", server.URL + "/api/messages", "--site-url", "https://wipe.me", "--receipt", receiptPath}, strings.NewReader("private message"), &stdout, &stderr, "test")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -72,18 +71,14 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret, err := base58.Normalize(link.Fragment, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	messageID, err := base58.Normalize(strings.TrimPrefix(link.Path, "/"), 12)
+	messageID, secret, err := wipeme.ParsePrivateLink(link.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if messageID != uploadedID {
 		t.Fatalf("uploaded ID %q differs from link ID %q", uploadedID, messageID)
 	}
-	decrypted, err := envelope.Read(bytes.NewReader(uploaded), messageID, secret)
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +103,7 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 
 func TestDeleteFromPrivateLink(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodDelete || request.URL.Path != "/1K7mQ2xR8VpC" || request.Header.Get("X-Wipe-Deletion-Key") == "" {
+		if request.Method != http.MethodDelete || request.URL.Path != "/api/messages/1K7mQ2xR8VpC" || request.Header.Get("X-Wipe-Deletion-Key") == "" {
 			t.Errorf("unexpected delete request: %s %s %#v", request.Method, request.URL.Path, request.Header)
 		}
 		_, _ = writer.Write([]byte(`{"deleted":true}`))

@@ -93,6 +93,50 @@ printf '%s' "$PRIVATE_LINK" | wipeme delete
 
 Run `wipeme --help` or `wipeme delete --help` for the complete command reference.
 
+## Configuration
+
+Optional YAML configuration can be stored for all users or for the current user:
+
+```text
+/etc/wipeme/config.yaml
+~/.wipeme/config.yaml
+```
+
+The user file overrides the system file. A minimal configuration usually needs
+only the shared server URL:
+
+```yaml
+server_url: https://wipe.me
+expires: 24h
+copy: false
+```
+
+Both the API and public link site inherit `server_url`. For split development
+servers, `api_url` and `site_url` can override them independently. Configuration
+priority is: command flags, environment variables, user file, system file, then
+built-in defaults.
+
+Use a specific file with `--config ./config.yaml` or `WIPEME_CONFIG`. Environment
+configuration supports `WIPEME_SERVER_URL`, `WIPEME_API_URL`, `WIPEME_SITE_URL`,
+`WIPEME_EXPIRES`, and `WIPEME_COPY`. `WIPEME_API_URL` and `WIPEME_SITE_URL` remain
+separate so local API and frontend development servers can use different ports.
+Configuration files are for preferences only; do not store private links, secrets,
+deletion keys, or creator receipts in them.
+
+### Progress
+
+When stderr is an interactive terminal, the CLI uses byte-based SDK progress events
+to update one line during encryption and upload:
+
+```text
+Encrypting... ▰▰▰▱▱▱▱▱▱▱▱▱  25%
+Uploading...  ▰▰▰▰▰▰▰▰▰▱▱▱  75%
+```
+
+The uploading phase replaces the encryption phase on the same line. Progress is
+automatically hidden when stderr is redirected or when `--json` is used, so stdout
+and pipelines remain clean.
+
 ## Installation
 
 Prebuilt macOS and Linux archives will be attached to tagged [GitHub releases](https://github.com/wipe-me/cli/releases). Until the first release, build from source with Go 1.25 or newer:
@@ -114,7 +158,7 @@ https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
 - The secret has approximately 94 bits of entropy
 - The message ID supplies deterministic Argon2id salt context
 - Argon2id derives a 256-bit root, then HKDF separates encryption and deletion capabilities
-- AES-256-GCM encrypts the manifest and independently authenticates 4 MiB chunks
+- AES-256-GCM encrypts the manifest and independently authenticates attachment chunks (512 KiB by default)
 - Filenames, messages, MIME types, media classification, dimensions, and sizes are encrypted
 
 The reusable [Wipe.me SDK](https://github.com/wipe-me/sdk) owns the cryptographic
@@ -159,15 +203,12 @@ Development servers can be selected without rebuilding:
 
 ```sh
 printf '%s' 'local test' | \
+  WIPEME_SERVER_URL=http://localhost:5173 \
   WIPEME_API_URL=http://localhost:8787/api/messages \
-  WIPEME_SITE_URL=http://localhost:5173 \
   wipeme
 ```
 
 ## Development
-
-When stderr is an interactive terminal, the CLI reports real encryption and upload
-percentages there. JSON/stdout output and pipelines remain clean.
 
 ```sh
 go test ./...

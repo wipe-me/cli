@@ -28,6 +28,7 @@ func TestBuildLink(t *testing.T) {
 }
 
 func TestVersionDoesNotContactServer(t *testing.T) {
+	clearConfigEnvironment(t)
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"--version"}, bytes.NewReader(nil), &stdout, &stderr, "1.2.3")
 	if code != 0 || stdout.String() != "wipeme 1.2.3\n" || stderr.Len() != 0 {
@@ -36,6 +37,7 @@ func TestVersionDoesNotContactServer(t *testing.T) {
 }
 
 func TestNoInputFails(t *testing.T) {
+	clearConfigEnvironment(t)
 	var stdout, stderr bytes.Buffer
 	code := Run(nil, bytes.NewReader(nil), &stdout, &stderr, "test")
 	if code == 0 || !bytes.Contains(stderr.Bytes(), []byte("provide a message")) {
@@ -43,7 +45,56 @@ func TestNoInputFails(t *testing.T) {
 	}
 }
 
+func TestProgressDisplayReplacesEncryptionWithUpload(t *testing.T) {
+	var output bytes.Buffer
+	display := &progressDisplay{writer: &output}
+	display.update(wipeme.Progress{Phase: "encrypting", Percent: 10})
+	display.update(wipeme.Progress{Phase: "encrypting", Percent: 100})
+	display.update(wipeme.Progress{Phase: "uploading", Percent: 50})
+	display.update(wipeme.Progress{Phase: "uploading", Percent: 100})
+	display.finish()
+
+	got := output.String()
+	for _, want := range []string{
+		"\rEncrypting... ▰▱▱▱▱▱▱▱▱▱▱▱  10%",
+		"\rEncrypting... ▰▰▰▰▰▰▰▰▰▰▰▰ 100%",
+		"\rUploading...  ▰▰▰▰▰▰▱▱▱▱▱▱  50%",
+		"\rUploading...  ▰▰▰▰▰▰▰▰▰▰▰▰ 100%\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress output %q does not contain %q", got, want)
+		}
+	}
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("progress should finish with exactly one newline: %q", got)
+	}
+}
+
+func TestProgressDisplayFinishesInterruptedLine(t *testing.T) {
+	var output bytes.Buffer
+	display := &progressDisplay{writer: &output}
+	display.update(wipeme.Progress{Phase: "encrypting", Percent: 25})
+	display.finish()
+	display.finish()
+	if got := output.String(); !strings.HasSuffix(got, " 25%\n") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("unexpected interrupted progress output %q", got)
+	}
+}
+
+func TestInteractiveProgressIsDisabledForNonTerminalOutput(t *testing.T) {
+	var stderr bytes.Buffer
+	progress, finish := interactiveProgress(&stderr, false)
+	if progress != nil {
+		t.Fatal("expected progress to be disabled for non-terminal stderr")
+	}
+	finish()
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected progress output %q", stderr.String())
+	}
+}
+
 func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
+	clearConfigEnvironment(t)
 	var uploaded []byte
 	var uploadedID string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -102,6 +153,7 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 }
 
 func TestDeleteFromPrivateLink(t *testing.T) {
+	clearConfigEnvironment(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete || request.URL.Path != "/api/messages/1K7mQ2xR8VpC" || request.Header.Get("X-Wipe-Deletion-Key") == "" {
 			t.Errorf("unexpected delete request: %s %s %#v", request.Method, request.URL.Path, request.Header)

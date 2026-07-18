@@ -12,18 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wipe-me/cli/internal/clipboard"
 	"github.com/wipe-me/cli/internal/media"
 	"github.com/wipe-me/sdk/go/wipeme"
-)
-
-const (
-	defaultAPI  = "https://wipe.me/api/messages"
-	defaultSite = "https://wipe.me"
 )
 
 type stringList []string
@@ -43,15 +38,7 @@ func (value durationValue) String() string {
 	return value.target.String()
 }
 func (value durationValue) Set(input string) error {
-	if strings.HasSuffix(input, "d") && strings.Count(input, "d") == 1 {
-		days, err := strconv.ParseFloat(strings.TrimSuffix(input, "d"), 64)
-		if err != nil || days <= 0 {
-			return fmt.Errorf("invalid day duration %q", input)
-		}
-		*value.target = time.Duration(days * float64(24*time.Hour))
-		return nil
-	}
-	parsed, err := time.ParseDuration(input)
+	parsed, err := parseDuration(input)
 	if err != nil {
 		return err
 	}
@@ -60,18 +47,22 @@ func (value durationValue) Set(input string) error {
 }
 
 type config struct {
-	APIEndpoint string
-	SiteURL     string
-	Expires     time.Duration
-	Message     string
-	MessageFile string
-	Attachments stringList
-	StdinName   string
-	StdinType   string
-	JSON        bool
-	Copy        bool
-	Receipt     string
-	ShowVersion bool
+	ServerURL      string
+	APIEndpoint    string
+	SiteURL        string
+	ConfigPath     string
+	APIConfigured  bool
+	SiteConfigured bool
+	Expires        time.Duration
+	Message        string
+	MessageFile    string
+	Attachments    stringList
+	StdinName      string
+	StdinType      string
+	JSON           bool
+	Copy           bool
+	Receipt        string
+	ShowVersion    bool
 }
 
 type jsonOutput struct {
@@ -158,7 +149,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		return err
 	}
 	defer closeAttachments()
-	progress := interactiveProgress(stderr, settings.JSON)
+	progress, finishProgress := interactiveProgress(stderr, settings.JSON)
+	defer finishProgress()
 	var envelope bytes.Buffer
 	encrypted, err := wipeme.EncryptWithOptions(&envelope, messageID, secret, message, attachments, wipeme.CryptoOptions{Progress: progress})
 	if err != nil {
@@ -207,32 +199,83 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	return err
 }
 
-func interactiveProgress(stderr io.Writer, jsonMode bool) wipeme.ProgressFunc {
+const progressBarWidth = 12
+
+type progressDisplay struct {
+	writer    io.Writer
+	active    bool
+	lineWidth int
+}
+
+func interactiveProgress(stderr io.Writer, jsonMode bool) (wipeme.ProgressFunc, func()) {
 	file, ok := stderr.(*os.File)
 	if jsonMode || !ok {
-		return nil
+		return nil, func() {}
 	}
 	info, err := file.Stat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		return nil
+		return nil, func() {}
 	}
-	return func(event wipeme.Progress) {
-		label := strings.ToUpper(event.Phase[:1]) + event.Phase[1:]
-		fmt.Fprintf(stderr, "\r%s %d%%", label, event.Percent)
-		if event.Percent == 100 {
-			fmt.Fprintln(stderr)
-		}
+	display := &progressDisplay{writer: stderr}
+	return display.update, display.finish
+}
+
+func (display *progressDisplay) update(event wipeme.Progress) {
+	percent := event.Percent
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	filled := percent * progressBarWidth / 100
+	bar := strings.Repeat("▰", filled) + strings.Repeat("▱", progressBarWidth-filled)
+	line := fmt.Sprintf("%-13s %s %3d%%", progressLabel(event.Phase), bar, percent)
+	width := utf8.RuneCountInString(line)
+	padding := ""
+	if display.lineWidth > width {
+		padding = strings.Repeat(" ", display.lineWidth-width)
+	}
+	fmt.Fprintf(display.writer, "\r%s%s", line, padding)
+	display.active = true
+	display.lineWidth = width
+
+	if event.Phase == "uploading" && percent == 100 {
+		fmt.Fprintln(display.writer)
+		display.active = false
+		display.lineWidth = 0
+	}
+}
+
+func (display *progressDisplay) finish() {
+	if display.active {
+		fmt.Fprintln(display.writer)
+		display.active = false
+		display.lineWidth = 0
+	}
+}
+
+func progressLabel(phase string) string {
+	switch phase {
+	case "encrypting":
+		return "Encrypting..."
+	case "uploading":
+		return "Uploading..."
+	case "":
+		return "Working..."
+	default:
+		return strings.ToUpper(phase[:1]) + phase[1:] + "..."
 	}
 }
 
 func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
-	settings := config{
-		APIEndpoint: envOrDefault("WIPEME_API_URL", defaultAPI),
-		SiteURL:     envOrDefault("WIPEME_SITE_URL", defaultSite),
-		Expires:     24 * time.Hour,
+	settings, err := loadBaseConfig(args)
+	if err != nil {
+		return config{}, nil, err
 	}
 	flags := flag.NewFlagSet("wipeme", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.StringVar(&settings.ConfigPath, "config", settings.ConfigPath, "configuration file (default: /etc/wipeme/config.yaml then ~/.wipeme/config.yaml)")
+	flags.StringVar(&settings.ServerURL, "server-url", settings.ServerURL, "shared API and public site base URL")
 	flags.StringVar(&settings.APIEndpoint, "api-url", settings.APIEndpoint, "wipe.me create-message API endpoint")
 	flags.StringVar(&settings.SiteURL, "site-url", settings.SiteURL, "public wipe.me site URL")
 	flags.Var(durationValue{target: &settings.Expires}, "expires", "unopened-message expiration (for example 1h or 7d)")
@@ -242,7 +285,7 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.StringVar(&settings.StdinName, "name", "stdin.bin", "filename when --attach - is used")
 	flags.StringVar(&settings.StdinType, "type", "", "MIME type override when --attach - is used")
 	flags.BoolVar(&settings.JSON, "json", false, "print structured JSON")
-	flags.BoolVar(&settings.Copy, "copy", false, "copy the link instead of printing it")
+	flags.BoolVar(&settings.Copy, "copy", settings.Copy, "copy the link instead of printing it")
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
 	flags.Usage = func() {
@@ -252,6 +295,16 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	}
 	if err := flags.Parse(args); err != nil {
 		return config{}, nil, err
+	}
+	explicitFlags := make(map[string]bool)
+	flags.Visit(func(item *flag.Flag) { explicitFlags[item.Name] = true })
+	if explicitFlags["server-url"] {
+		if !explicitFlags["api-url"] && !settings.APIConfigured {
+			settings.APIEndpoint = settings.ServerURL
+		}
+		if !explicitFlags["site-url"] && !settings.SiteConfigured {
+			settings.SiteURL = settings.ServerURL
+		}
 	}
 	if settings.Expires <= 0 {
 		return config{}, nil, fmt.Errorf("--expires must be positive")
@@ -263,11 +316,16 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 }
 
 func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	settings, err := loadBaseConfig(args)
+	if err != nil {
+		return err
+	}
 	flags := flag.NewFlagSet("wipeme delete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	apiEndpoint := envOrDefault("WIPEME_API_URL", defaultAPI)
 	jsonResult := false
-	flags.StringVar(&apiEndpoint, "api-url", apiEndpoint, "wipe.me message API endpoint")
+	flags.StringVar(&settings.ConfigPath, "config", settings.ConfigPath, "configuration file (default: /etc/wipeme/config.yaml then ~/.wipeme/config.yaml)")
+	flags.StringVar(&settings.ServerURL, "server-url", settings.ServerURL, "shared API and public site base URL")
+	flags.StringVar(&settings.APIEndpoint, "api-url", settings.APIEndpoint, "wipe.me message API endpoint")
 	flags.BoolVar(&jsonResult, "json", false, "print structured JSON")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: wipeme delete [options] [link]")
@@ -279,6 +337,11 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return nil
 		}
 		return err
+	}
+	explicitFlags := make(map[string]bool)
+	flags.Visit(func(item *flag.Flag) { explicitFlags[item.Name] = true })
+	if explicitFlags["server-url"] && !explicitFlags["api-url"] && !settings.APIConfigured {
+		settings.APIEndpoint = settings.ServerURL
 	}
 	if flags.NArg() > 1 {
 		return fmt.Errorf("delete accepts at most one private link")
@@ -302,7 +365,7 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer wipe(deletionKey[:])
-	client, err := newAPIClient(apiEndpoint)
+	client, err := newAPIClient(settings.APIEndpoint)
 	if err != nil {
 		return err
 	}
@@ -478,11 +541,4 @@ func isTerminal(reader io.Reader) bool {
 	}
 	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func envOrDefault(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
 }

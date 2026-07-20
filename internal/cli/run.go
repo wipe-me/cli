@@ -289,8 +289,13 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: wipeme [options] [file ...]")
+		fmt.Fprintln(stderr, "Usage:")
+		fmt.Fprintln(stderr, "  wipeme [options] [file ...]")
+		fmt.Fprintln(stderr, "  wipeme delete [options] [link]")
 		fmt.Fprint(stderr, "\nCreate a private, one-time link from stdin and optional attachments.\n\n")
+		fmt.Fprintln(stderr, "Commands:")
+		fmt.Fprintln(stderr, "  delete    permanently delete a message using its private link")
+		fmt.Fprintln(stderr, "\nOptions:")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {

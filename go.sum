@@ -1,5 +1,5 @@
-github.com/wipe-me/sdk/go v0.2.0-alpha.1 h1:/cEvpFpcVup+VHxMHU6thlQpwLDTSpxZ5BOaqMKF8VY=
-github.com/wipe-me/sdk/go v0.2.0-alpha.1/go.mod h1:kEPqJYfE1WiRazukzFIkuIYcIWuhKuR2cYENCLWpdEE=
+github.com/wipe-me/sdk/go v0.4.0-alpha.1 h1:Fes7w01zy9U7Y6LLWYZGiX/ShIw55zWJQCEHa7OG7bs=
+github.com/wipe-me/sdk/go v0.4.0-alpha.1/go.mod h1:kEPqJYfE1WiRazukzFIkuIYcIWuhKuR2cYENCLWpdEE=
 go.yaml.in/yaml/v3 v3.0.4 h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/crypto v0.41.0 h1:WKYxWedPGCTVVl5+WHSSrOBT0O8lx32+zxmHxijgXp4=

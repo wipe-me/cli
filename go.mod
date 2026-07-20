@@ -3,7 +3,7 @@ module github.com/wipe-me/cli
 go 1.25.0
 
 require (
-	github.com/wipe-me/sdk/go v0.2.0-alpha.1
+	github.com/wipe-me/sdk/go v0.4.0-alpha.1
 	go.yaml.in/yaml/v3 v3.0.4
 )
 

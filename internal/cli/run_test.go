@@ -36,6 +36,34 @@ func TestVersionDoesNotContactServer(t *testing.T) {
 	}
 }
 
+func TestHelpShowsMainCommandUsage(t *testing.T) {
+	clearConfigEnvironment(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--help"}, bytes.NewReader(nil), &stdout, &stderr, "test")
+	if code != 0 || stdout.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("help output %q does not contain %q", stderr.String(), expected)
+		}
+	}
+}
+
+func TestHelpShowsDeleteCommandUsage(t *testing.T) {
+	clearConfigEnvironment(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"delete", "--help"}, bytes.NewReader(nil), &stdout, &stderr, "test")
+	if code != 0 || stdout.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"Usage: wipeme delete [options] [link]", "-config", "-api-url"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("delete help output %q does not contain %q", stderr.String(), expected)
+		}
+	}
+}
+
 func TestNoInputFails(t *testing.T) {
 	clearConfigEnvironment(t)
 	var stdout, stderr bytes.Buffer

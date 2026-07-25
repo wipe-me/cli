@@ -139,11 +139,46 @@ and pipelines remain clean.
 
 ## Installation
 
-Prebuilt macOS and Linux archives will be attached to tagged [GitHub releases](https://github.com/wipe-me/cli/releases). Until the first release, build from source with Go 1.25 or newer:
+### Homebrew
+
+Install the macOS binary from the official Wipe.me tap:
+
+```sh
+brew install --cask wipe-me/tap/wipeme
+```
+
+### Debian and Ubuntu
+
+Download the `.deb` matching your architecture from the
+[GitHub releases page](https://github.com/wipe-me/cli/releases), then install
+it with APT:
+
+```sh
+sudo apt install ./wipeme_*.deb
+```
+
+### Fedora, RHEL, and compatible distributions
+
+Download the `.rpm` matching your architecture from the
+[GitHub releases page](https://github.com/wipe-me/cli/releases), then install
+it with your system package manager:
+
+```sh
+sudo dnf install ./wipeme_*.rpm
+```
+
+### Archives and Go
+
+Prebuilt macOS and Linux archives, SHA-256 checksums, `.deb` packages, and `.rpm`
+packages are attached to tagged
+[GitHub releases](https://github.com/wipe-me/cli/releases). You can also build and
+install directly with Go 1.25 or newer:
 
 ```sh
 go install github.com/wipe-me/cli/cmd/wipeme@latest
 ```
+
+Verify any downloaded release artifact against `checksums.txt` before installing it.
 
 ## Link format
 

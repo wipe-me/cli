@@ -20,7 +20,8 @@ builds:
       - arm64
 
 archives:
-  - formats:
+  - id: archives
+    formats:
       - tar.gz
     name_template: >-
       {{ .ProjectName }}_
@@ -28,6 +29,49 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
       {{- else }}{{ .Arch }}{{ end }}
+
+nfpms:
+  - id: linux-packages
+    package_name: wipeme
+    ids:
+      - wipeme
+    vendor: Wipe.me
+    homepage: https://wipe.me
+    maintainer: Wipe.me <v@swap.io>
+    description: Create private, one-time wipe.me links from your terminal.
+    license: Apache-2.0
+    section: utils
+    priority: optional
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/wipeme/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/wipeme/README.md
+    rpm:
+      group: Applications/Internet
+
+homebrew_casks:
+  - name: wipeme
+    ids:
+      - archives
+    binaries:
+      - wipeme
+    homepage: https://wipe.me
+    description: Create private, one-time wipe.me links from your terminal
+    directory: Casks
+    skip_upload: auto
+    repository:
+      owner: wipe-me
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: wipe-me release bot
+      email: v@swap.io
 
 checksum:
   name_template: checksums.txt

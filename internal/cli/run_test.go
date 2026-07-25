@@ -180,6 +180,64 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 	}
 }
 
+func TestEndToEndUploadSanitizesSupportedAttachment(t *testing.T) {
+	clearConfigEnvironment(t)
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var err error
+		uploaded, err = io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read upload: %v", err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	segment := func(marker byte, payload []byte) []byte {
+		length := len(payload) + 2
+		return append([]byte{0xff, marker, byte(length >> 8), byte(length)}, payload...)
+	}
+	pixelScan := []byte{1, 2, 3, 0xff, 0xd9}
+	jpeg := append([]byte{0xff, 0xd8}, segment(0xe1, []byte("Exif GPS coordinates"))...)
+	jpeg = append(jpeg, segment(0xda, []byte{1, 2})...)
+	jpeg = append(jpeg, pixelScan...)
+	attachmentPath := filepath.Join(t.TempDir(), "private-photo.jpg")
+	if err := os.WriteFile(attachmentPath, jpeg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run(
+		[]string{"--api-url", server.URL, "--site-url", "https://wipe.me", attachmentPath},
+		strings.NewReader("with attachment"),
+		&stdout,
+		&stderr,
+		"test",
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	messageID, secret, err := wipeme.ParsePrivateLink(strings.TrimSpace(stdout.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decrypted.Attachments) != 1 {
+		t.Fatalf("unexpected attachments: %#v", decrypted.Attachments)
+	}
+	data := decrypted.Attachments[0].Data
+	if bytes.Contains(data, []byte("Exif")) || !bytes.HasSuffix(data, pixelScan) {
+		t.Fatalf("attachment was not sanitized losslessly: %x", data)
+	}
+	if original, err := os.ReadFile(attachmentPath); err != nil || !bytes.Equal(original, jpeg) {
+		t.Fatalf("original attachment changed: %x err=%v", original, err)
+	}
+}
+
 func TestDeleteFromPrivateLink(t *testing.T) {
 	clearConfigEnvironment(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

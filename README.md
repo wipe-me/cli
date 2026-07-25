@@ -174,7 +174,25 @@ of 14 days. Every message is claimed at most once.
 
 Attachments are inspected by content rather than trusting their extensions. Images, audio, video, text, and generic files receive different encrypted presentation metadata so the web client can choose an appropriate viewer after decryption. Unsupported or unknown formats remain generic encrypted downloads.
 
-The CLI does not invoke FFmpeg and has no native runtime dependencies. Image dimensions are extracted for supported Go image formats; richer audio/video metadata can be calculated by the web client after decryption.
+Before encryption, the CLI automatically removes supported private metadata from a
+temporary local copy:
+
+- JPEG/JPG: APP1 EXIF/XMP, APP13 IPTC/Photoshop metadata, and comments
+- PNG/APNG: `eXIf`, `iTXt`, `tEXt`, `zTXt`, `tIME`, and `pHYs` chunks
+- WebP: EXIF and XMP chunks and their VP8X feature flags
+- MP3: ID3v2 and ID3v1 tags
+
+Pixel data, JPEG JFIF and ICC/color data, PNG/APNG color and animation chunks,
+WebP ICC, alpha and animation data, and MP3 audio frames remain unchanged. Original
+files are never modified. Unsupported formats—including PDF, Office documents,
+archives, video containers, and audio formats other than MP3—are encrypted
+byte-for-byte; sanitize those files separately when their embedded metadata is a
+concern.
+
+Cleanup and encryption happen locally and do not use a third-party processing
+service. The CLI does not invoke FFmpeg and has no native runtime dependencies.
+Image dimensions are extracted for supported Go image formats; richer audio/video
+metadata can be calculated by the web client after decryption.
 
 ## API
 

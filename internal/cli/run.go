@@ -135,6 +135,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		}
 		files = append(files, file)
 	}
+	files, cleanupSanitized, err := sanitizeAttachments(files)
+	if err != nil {
+		return err
+	}
+	defer cleanupSanitized()
 
 	messageID, err := wipeme.GenerateMessageID()
 	if err != nil {
@@ -507,6 +512,26 @@ func openAttachments(files []media.File) ([]wipeme.AttachmentInput, func(), erro
 		})
 	}
 	return attachments, closeAll, nil
+}
+
+func sanitizeAttachments(files []media.File) ([]media.File, func(), error) {
+	sanitized := make([]media.File, 0, len(files))
+	cleanups := make([]func(), 0, len(files))
+	cleanupAll := func() {
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
+	}
+	for _, file := range files {
+		privateFile, _, cleanup, err := media.SanitizeMetadata(file)
+		if err != nil {
+			cleanupAll()
+			return nil, func() {}, err
+		}
+		cleanups = append(cleanups, cleanup)
+		sanitized = append(sanitized, privateFile)
+	}
+	return sanitized, cleanupAll, nil
 }
 
 func writeReceipt(path string, receipt creatorReceipt) error {

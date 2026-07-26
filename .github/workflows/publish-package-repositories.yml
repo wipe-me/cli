@@ -1,38 +1,46 @@
-name: Release
+name: Publish package repositories
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to publish
+        required: true
+        type: string
+      channel:
+        description: Package repository channel
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - stable
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: package-repositories
   cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-          cache: true
-      - name: Test
-        run: go test ./...
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+
+      - name: Download release packages
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p dist
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist \
+            --pattern '*.deb' \
+            --pattern '*.rpm'
+
       - name: Install repository tooling
         run: |
           sudo apt-get update
@@ -42,22 +50,14 @@ jobs:
             dpkg-dev \
             gnupg \
             rpm
+
       - name: Import package signing key
         env:
           PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
         run: |
           test -n "$PACKAGES_GPG_PRIVATE_KEY"
           printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
-      - name: Select package channel
-        id: package-channel
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if [[ "$RELEASE_TAG" == *-* ]]; then
-            echo "channel=preview" >>"$GITHUB_OUTPUT"
-          else
-            echo "channel=stable" >>"$GITHUB_OUTPUT"
-          fi
+
       - name: Publish package repositories
         env:
           CF_R2_ACCOUNT_ID: ${{ secrets.CF_R2_ACCOUNT_ID }}
@@ -67,5 +67,5 @@ jobs:
         run: |
           scripts/sync-package-repositories.sh \
             dist \
-            "${{ steps.package-channel.outputs.channel }}" \
+            "${{ inputs.channel }}" \
             "$RUNNER_TEMP/wipeme-packages"

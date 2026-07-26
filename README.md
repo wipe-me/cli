@@ -149,25 +149,42 @@ brew install --cask wipe-me/tap/wipeme
 
 ### Debian and Ubuntu
 
-Download the `.deb` matching your architecture from the
-[GitHub releases page](https://github.com/wipe-me/cli/releases), then install
-it with APT:
+The current CLI release is a preview. Add the signed Wipe.me preview repository
+once, then install and update `wipeme` normally with APT:
 
 ```sh
-sudo apt install ./wipeme_*.deb
+sudo install -d -m 0755 /usr/share/keyrings
+curl -fsSL https://packages.wipe.me/keys/wipeme-packages.gpg |
+  sudo tee /usr/share/keyrings/wipeme-packages.gpg >/dev/null
+curl -fsSL https://packages.wipe.me/apt/wipeme-preview.sources |
+  sudo tee /etc/apt/sources.list.d/wipeme.sources >/dev/null
+sudo apt update
+sudo apt install wipeme
 ```
 
 ### Fedora, RHEL, and compatible distributions
 
-Download the `.rpm` matching your architecture from the
-[GitHub releases page](https://github.com/wipe-me/cli/releases), then install
-it with your system package manager:
+Add the signed Wipe.me preview repository once, then install with DNF:
 
 ```sh
-sudo dnf install ./wipeme_*.rpm
+sudo curl -fsSL \
+  https://packages.wipe.me/rpm/wipeme-preview.repo \
+  -o /etc/yum.repos.d/wipeme.repo
+sudo dnf install wipeme
 ```
 
-### Archives and Go
+Both repositories support AMD64/x86-64 and ARM64/AArch64. The repository signing
+key fingerprint is:
+
+```text
+C83C 58D4 F446 BB20 24E4  2CA1 DEC6 6000 6BED 76F6
+```
+
+Preview packages never enter the stable channel automatically. When a stable CLI
+release is available, the installation instructions will switch to the stable
+repository.
+
+### Direct downloads, archives, and Go
 
 Prebuilt macOS and Linux archives, SHA-256 checksums, `.deb` packages, and `.rpm`
 packages are attached to tagged

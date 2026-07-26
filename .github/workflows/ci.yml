@@ -20,6 +20,8 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
+      - name: Validate packaging scripts
+        run: bash -n scripts/*.sh
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - name: Test

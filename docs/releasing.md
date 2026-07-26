@@ -6,6 +6,38 @@ Releases are built by GoReleaser when a `v*` tag is pushed. A release contains:
 - Debian and RPM packages for AMD64 and ARM64
 - SHA-256 checksums covering every downloadable artifact
 - a generated Homebrew cask
+- signed APT and RPM repositories at `packages.wipe.me`
+
+## Package repository setup
+
+Release workflows publish packages to a private Cloudflare R2 bucket exposed
+read-only through `https://packages.wipe.me`.
+
+The GitHub repository requires these Actions secrets:
+
+- `PACKAGES_GPG_PRIVATE_KEY`: ASCII-armored private repository signing key
+- `CF_R2_ACCOUNT_ID`: Cloudflare account containing the package bucket
+- `CF_R2_ACCESS_KEY_ID`: bucket-scoped R2 write credential
+- `CF_R2_SECRET_ACCESS_KEY`: corresponding R2 secret
+- `CF_R2_BUCKET`: R2 package bucket name
+
+The public signing key is committed at `packaging/wipeme-packages.asc`. Its
+fingerprint is:
+
+```text
+C83C 58D4 F446 BB20 24E4  2CA1 DEC6 6000 6BED 76F6
+```
+
+The private key must never be committed. Rotate the key before its 2029-07-25
+expiration and publish both old and new public keys during the transition.
+
+Tags containing a prerelease suffix publish to the `preview` APT/RPM channel.
+Stable semantic-version tags publish to `stable`. Repository publishing is
+serialized in GitHub Actions to prevent concurrent metadata updates.
+
+To republish an existing GitHub release, run **Publish package repositories** and
+provide its tag and intended channel. This is also the bootstrap path for releases
+created before package-repository publishing was enabled.
 
 ## Homebrew tap setup
 
@@ -35,7 +67,9 @@ as `v0.1.0-alpha.1`. Publish the generated `dist/wipeme.rb` to
    ```
 
 7. Wait for the release workflow and verify every asset on GitHub.
-8. For a prerelease, publish the generated cask to the tap manually and test
+8. Confirm the APT/RPM repository publication step completed and verify
+   `apt-cache policy wipeme` or `dnf info wipeme`.
+9. For a prerelease, publish the generated cask to the tap manually and test
    `brew install --cask wipe-me/tap/wipeme`.
 
 Do not move or recreate a published tag. Fix release failures with a new prerelease

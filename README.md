@@ -1,21 +1,67 @@
 # wipeme
 
-Create private, one-time [wipe.me](https://wipe.me) links from your terminal—text, files, images, audio, and more.
+Create, consume, and safely inject private one-time [wipe.me](https://wipe.me) messages from terminals, agents, containers, and CI/CD.
 
 ```console
 $ wipeme
 Enter a private message. Press Ctrl-D on an empty line when finished:
 Meet me at 9
 <Ctrl-D>
-https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
+https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 ```
 
-`wipeme` encrypts everything locally. The service receives an opaque encrypted envelope and the 12-character message ID, but the 16-character Base58 secret stays after the URL's `#` fragment and is not sent in HTTP requests.
+`wipeme` encrypts everything locally. The service receives an opaque encrypted envelope and the 9-character automatic message ID, but the 12-character Base58 secret stays after the URL's `#` fragment and is never sent in HTTP requests. Manual-passphrase links use an 8-character ID and no fragment; the separately agreed passphrase may have any Unicode form from 8 through 256 characters.
 
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
 ## Usage
+
+```text
+wipeme [options] [file ...]
+wipeme read [options] <private-link>
+wipeme exec [options] <private-link> -- <command> [args...]
+wipeme delete [options] <private-link>
+```
+
+Always quote links containing `#`, because shells otherwise interpret the fragment as a comment.
+
+### Read and exec for agents
+
+Consume and print the first readable block:
+
+```sh
+wipeme read --non-interactive 'https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7'
+```
+
+For manual-passphrase messages, keep credentials out of arguments and use a file or environment source:
+
+```sh
+WIPEME_PASSPHRASE='previously agreed phrase' \
+  wipeme read --non-interactive 'https://wipe.me/aBc1-dEf2'
+```
+
+Inject the first readable block directly into a child environment without inserting a shell:
+
+```sh
+wipeme exec --non-interactive --link-file /run/secrets/wipeme-link \
+  --set-env STRIPE_API_KEY -- stripe customers list
+```
+
+Available passphrases are tried locally in this order: fragment, `--passphrase-file`, `--passphrase-stdin`, `--passphrase-env`, `WIPEME_PASSPHRASE`, then up to three hidden terminal prompts. The encrypted message is retrieved only once. Prefer file or environment sources for automation; `--passphrase-stdin` is intentionally rejected for `exec` because it conflicts with child stdin.
+
+`read` consumes the one-time server copy before local decryption, matching the current service protocol. It intentionally exposes selected plaintext on stdout. Use `--output`, `--output-dir`, or `--json` when appropriate; secret files are created with mode 0600 and are never overwritten.
+
+### Generate and transfer a password
+
+```sh
+wipeme --generate-pass --length 32 --chars portable
+
+wipeme --generate-pass --set-env DATABASE_PASSWORD \
+  --link-file ./database-password.link -- ./initialize-database
+```
+
+The password is generated with OS cryptographic randomness, placed in the first ordinary text block, encrypted, and never printed. Presets are `portable`, `alnum`, `base58`, `base64url`, `hex`, `digits`, `letters`, and `ascii`; `--alphabet` supplies a validated custom printable ASCII alphabet. During child execution stdout belongs only to the child. Without `--link-file` or `--copy`, the labelled private link is written to stderr.
 
 ### Interactive
 
@@ -200,14 +246,15 @@ Verify any downloaded release artifact against `checksums.txt` before installing
 ## Link format
 
 ```text
-https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
-                └ message ID ┘  └──── secret ────┘
+Automatic: https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
+Manual:    https://wipe.me/aBc1-dEf2
 ```
 
-- Message ID: 12 Base58BTC characters, displayed as `4-4-4`
-- Secret: 16 uniformly random Base58BTC characters, displayed as `4-4-4-4`
+- Automatic message ID: 9 Base58BTC characters, displayed as `3-3-3`
+- Automatic fragment secret: 12 uniformly random Base58BTC characters, displayed as `3-3-3-3`
+- Manual-passphrase message ID: 8 Base58BTC characters, displayed as `4-4`, with no passphrase in the link
 - Dashes and spaces are presentation separators; Base58 remains case-sensitive
-- The secret has approximately 94 bits of entropy
+- The automatic fragment has approximately 70 bits of entropy
 - The message ID supplies deterministic Argon2id salt context
 - Argon2id derives a 256-bit root, then HKDF separates encryption and deletion capabilities
 - AES-256-GCM encrypts the manifest and independently authenticates attachment chunks (512 KiB by default)

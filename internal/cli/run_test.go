@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -43,9 +44,19 @@ func TestHelpShowsMainCommandUsage(t *testing.T) {
 	if code != 0 || stdout.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach"} {
+	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme read [options] <private-link>", "wipeme exec [options]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach", "-generate-pass"} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("help output %q does not contain %q", stderr.String(), expected)
+		}
+	}
+}
+
+func TestAccessHelpReturnsSuccess(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, command := range []string{"read", "exec"} {
+		var out, errs bytes.Buffer
+		if code := Run([]string{command, "--help"}, bytes.NewReader(nil), &out, &errs, "test"); code != 0 || !strings.Contains(errs.String(), "Usage: wipeme "+command) {
+			t.Fatalf("%s code=%d out=%q err=%q", command, code, out.String(), errs.String())
 		}
 	}
 }
@@ -150,12 +161,16 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messageID, secret, err := wipeme.ParsePrivateLink(link.String())
+	application, err := wipeme.ParseApplicationPrivateLink(link.String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if messageID != uploadedID {
-		t.Fatalf("uploaded ID %q differs from link ID %q", uploadedID, messageID)
+	if application.MessageID != uploadedID {
+		t.Fatalf("uploaded ID %q differs from link ID %q", uploadedID, application.MessageID)
+	}
+	messageID, secret, err := application.EnvelopeCryptoParameters()
+	if err != nil {
+		t.Fatal(err)
 	}
 	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
 	if err != nil {
@@ -172,11 +187,54 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.MessageID != messageID || receipt.Secret != secret || receipt.CipherVersion != 1 {
+	if receipt.MessageID != application.MessageID || receipt.Secret != application.Secret || receipt.CipherVersion != 1 {
 		t.Fatalf("unexpected receipt %#v", receipt)
 	}
 	if info, err := os.Stat(receiptPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("receipt permissions: info=%v err=%v", info, err)
+	}
+}
+
+func TestCreateReadAndOneTimeConsumption(t *testing.T) {
+	clearConfigEnvironment(t)
+	var envelope []byte
+	var contentHash string
+	consumed := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			envelope, _ = io.ReadAll(r.Body)
+			contentHash = r.Header.Get("X-Wipe-Content-Hash")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%q,"created":true}`, strings.TrimPrefix(r.URL.Path, "/api/messages/"))
+		case http.MethodGet:
+			if consumed {
+				http.Error(w, `{"error":"gone"}`, http.StatusNotFound)
+				return
+			}
+			consumed = true
+			w.Header().Set("X-Wipe-Content-Hash", contentHash)
+			w.Header().Set("X-Wipe-Cipher-Version", "1")
+			w.Write(envelope)
+		}
+	}))
+	defer server.Close()
+	var createOut, createErr bytes.Buffer
+	if code := Run([]string{"--api-url", server.URL, "--site-url", "https://wipe.me"}, strings.NewReader("agent secret"), &createOut, &createErr, "test"); code != 0 {
+		t.Fatalf("create code=%d err=%q", code, createErr.String())
+	}
+	link := strings.TrimSpace(createOut.String())
+	if !regexp.MustCompile(`^https://wipe\.me/[1-9A-HJ-NP-Za-km-z]{3}(?:-[1-9A-HJ-NP-Za-km-z]{3}){2}#[1-9A-HJ-NP-Za-km-z]{3}(?:-[1-9A-HJ-NP-Za-km-z]{3}){3}$`).MatchString(link) {
+		t.Fatalf("unexpected compact link %q", link)
+	}
+	var readOut, readErr bytes.Buffer
+	if code := Run([]string{"read", "--api-url", server.URL, "--non-interactive", link}, bytes.NewReader(nil), &readOut, &readErr, "test"); code != 0 || readOut.String() != "agent secret\n" {
+		t.Fatalf("read code=%d out=%q err=%q", code, readOut.String(), readErr.String())
+	}
+	readOut.Reset()
+	readErr.Reset()
+	if code := Run([]string{"read", "--api-url", server.URL, "--non-interactive", link}, bytes.NewReader(nil), &readOut, &readErr, "test"); code != exitRetrieve {
+		t.Fatalf("second read code=%d err=%q", code, readErr.String())
 	}
 }
 
@@ -218,7 +276,11 @@ func TestEndToEndUploadSanitizesSupportedAttachment(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	messageID, secret, err := wipeme.ParsePrivateLink(strings.TrimSpace(stdout.String()))
+	application, err := wipeme.ParseApplicationPrivateLink(strings.TrimSpace(stdout.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, secret, err := application.EnvelopeCryptoParameters()
 	if err != nil {
 		t.Fatal(err)
 	}

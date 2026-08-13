@@ -15,7 +15,7 @@ its own protocol or HTTP client implementation.
 
 ## Current behavior
 
-- IDs are 12 Base58BTC characters; 16-character secrets remain in URL fragments.
+- New automatic links use 9-character public IDs and 12-character fragment secrets, displayed as `3-3-3` and `3-3-3-3`. The SDK expands these to the v1 envelope's 12/16 inputs. Manual-passphrase links use 8-character public IDs with no fragment; legacy 12/16 automatic links remain readable.
 - CLI, web, and SDK clients use unified encrypted envelope v1.
 - Every v1 message is one-time. `X-Wipe-On-Read` is unsupported and is not sent.
 - `X-Wipe-Client` is optional extensible metadata and never affects cryptography.

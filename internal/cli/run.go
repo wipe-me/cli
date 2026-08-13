@@ -18,6 +18,7 @@ import (
 
 	"github.com/wipe-me/cli/internal/clipboard"
 	"github.com/wipe-me/cli/internal/media"
+	passwordgen "github.com/wipe-me/cli/internal/password"
 	"github.com/wipe-me/sdk/go/wipeme"
 )
 
@@ -63,6 +64,13 @@ type config struct {
 	Copy           bool
 	Receipt        string
 	ShowVersion    bool
+	GeneratePass   bool
+	Length         int
+	Chars          string
+	Alphabet       string
+	NoRequireEach  bool
+	SetEnv         string
+	LinkFile       string
 }
 
 type jsonOutput struct {
@@ -83,20 +91,27 @@ type creatorReceipt struct {
 // Run executes the CLI and returns a process exit code.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
 	var err error
-	if len(args) > 0 && args[0] == "delete" {
+	if len(args) > 0 && (args[0] == "read" || args[0] == "exec") {
+		err = runAccess(args[0], args[1:], stdin, stdout, stderr)
+	} else if len(args) > 0 && args[0] == "delete" {
 		err = runDelete(args[1:], stdin, stdout, stderr)
 	} else {
 		err = run(args, stdin, stdout, stderr, version)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "wipeme: %v\n", err)
+		var coded *cliError
+		if errors.As(err, &coded) {
+			return coded.code
+		}
 		return 1
 	}
 	return 0
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) error {
-	settings, paths, err := parseFlags(args, stderr)
+	flagArgs, child := splitCommand(args)
+	settings, paths, err := parseFlags(flagArgs, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -110,6 +125,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if settings.JSON && settings.Copy {
 		return fmt.Errorf("--json and --copy cannot be used together")
 	}
+	if len(child) > 0 && !settings.GeneratePass {
+		return fail(exitUsage, "a child command requires --generate-pass")
+	}
+	if settings.SetEnv != "" && (len(child) == 0 || !settings.GeneratePass) {
+		return fail(exitUsage, "--set-env requires --generate-pass and a command after --")
+	}
+	if len(child) > 0 && settings.JSON {
+		return fail(exitUsage, "--json cannot be used with child execution")
+	}
+	if settings.GeneratePass && (settings.Message != "" || settings.MessageFile != "") {
+		return fail(exitUsage, "--generate-pass cannot be combined with message input")
+	}
+	if settings.LinkFile != "" {
+		if err := preflightOutput(accessOptions{output: settings.LinkFile}); err != nil {
+			return err
+		}
+	}
 	paths = append(paths, settings.Attachments...)
 
 	message, stagedStdin, cleanup, err := collectInput(stdin, stderr, settings, &paths)
@@ -118,6 +150,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	if err != nil {
 		return err
+	}
+	var generated []byte
+	if settings.GeneratePass {
+		generated, err = passwordgen.Generate(passwordgen.Options{Length: settings.Length, Preset: settings.Chars, Alphabet: settings.Alphabet, NoRequireEach: settings.NoRequireEach})
+		if err != nil {
+			return err
+		}
+		defer wipe(generated)
+		doc := map[string]any{"blocks": []any{map[string]any{"type": "paragraph", "data": map[string]any{"text": string(generated)}}}}
+		encoded, _ := json.Marshal(doc)
+		message = string(encoded)
 	}
 	if message == "" && len(paths) == 0 {
 		return fmt.Errorf("provide a message on stdin or at least one attachment")
@@ -141,13 +184,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	defer cleanupSanitized()
 
-	messageID, err := wipeme.GenerateMessageID()
+	publicMessageID, publicSecret, err := wipeme.GenerateApplicationCapabilities()
 	if err != nil {
 		return fmt.Errorf("generate message ID: %w", err)
 	}
-	secret, err := wipeme.GenerateSecret()
+	application := wipeme.ApplicationLink{MessageID: publicMessageID, Secret: publicSecret}
+	messageID, secret, err := application.EnvelopeCryptoParameters()
 	if err != nil {
-		return fmt.Errorf("generate link secret: %w", err)
+		return err
 	}
 	attachments, closeAttachments, err := openAttachments(files)
 	if err != nil {
@@ -169,7 +213,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	expiresAt := time.Now().Add(settings.Expires)
 	created, err := client.CreateMessage(context.Background(), wipeme.CreateMessageRequest{
-		MessageID:   messageID,
+		MessageID:   publicMessageID,
 		Envelope:    envelope.Bytes(),
 		ContentHash: encrypted.ContentHash,
 		DeletionKey: encrypted.DeletionKeyHeader,
@@ -179,14 +223,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if err != nil {
 		return err
 	}
-	link, err := buildLink(settings.SiteURL, messageID, secret)
+	link, err := wipeme.FormatApplicationPrivateLink(settings.SiteURL, publicMessageID, publicSecret)
 	if err != nil {
 		return err
 	}
 	if settings.Receipt != "" {
-		receipt := creatorReceipt{CipherVersion: wipeme.ProtocolVersion, URL: link, MessageID: messageID, Secret: secret, ExpiresAt: expiresAt}
+		receipt := creatorReceipt{CipherVersion: wipeme.ProtocolVersion, URL: link, MessageID: publicMessageID, Secret: publicSecret, ExpiresAt: expiresAt}
 		if err := writeReceipt(settings.Receipt, receipt); err != nil {
 			return fmt.Errorf("message was created at %s, but the creator receipt could not be saved: %w", link, err)
+		}
+	}
+	if settings.LinkFile != "" {
+		if err := writePrivate(settings.LinkFile, []byte(link+"\n")); err != nil {
+			return fmt.Errorf("message was created but link file could not be saved: %w", err)
 		}
 	}
 
@@ -197,8 +246,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		fmt.Fprintln(stderr, "One-time link copied to the clipboard.")
 		return nil
 	}
+	if len(child) > 0 {
+		if settings.LinkFile == "" && !settings.Copy {
+			fmt.Fprintf(stderr, "Private link: %s\n", link)
+		}
+		sel, err := validateSelectors(stringList{settings.SetEnv})
+		if err != nil {
+			return err
+		}
+		env := os.Environ()
+		env = removeEnv(env, "WIPEME_PASSPHRASE")
+		env = removeEnv(env, "WIPEME_PRIVATE_LINK")
+		env = removeEnv(env, sel[0].name)
+		env = append(env, sel[0].name+"="+string(generated))
+		return runChild(child, stdin, stdout, stderr, env)
+	}
+	if settings.LinkFile != "" {
+		return nil
+	}
 	if settings.JSON {
-		return json.NewEncoder(stdout).Encode(jsonOutput{URL: link, MessageID: messageID, ExpiresAt: expiresAt, Created: created.Created})
+		return json.NewEncoder(stdout).Encode(jsonOutput{URL: link, MessageID: publicMessageID, ExpiresAt: expiresAt, Created: created.Created})
 	}
 	_, err = fmt.Fprintln(stdout, link)
 	return err
@@ -293,12 +360,23 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.BoolVar(&settings.Copy, "copy", settings.Copy, "copy the link instead of printing it")
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
+	flags.BoolVar(&settings.GeneratePass, "generate-pass", false, "securely generate a password as the first text block")
+	flags.IntVar(&settings.Length, "length", passwordgen.DefaultLength, "generated password length")
+	flags.StringVar(&settings.Chars, "chars", "", "portable, alnum, base58, base64url, hex, digits, letters, or ascii (default portable)")
+	flags.StringVar(&settings.Alphabet, "alphabet", "", "exact custom printable ASCII alphabet")
+	flags.BoolVar(&settings.NoRequireEach, "no-require-each", false, "disable applicable character-class requirements")
+	flags.StringVar(&settings.SetEnv, "set-env", "", "inject generated password into child environment")
+	flags.StringVar(&settings.LinkFile, "link-file", "", "save resulting private link in a mode-0600 file")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage:")
 		fmt.Fprintln(stderr, "  wipeme [options] [file ...]")
+		fmt.Fprintln(stderr, "  wipeme read [options] <private-link>")
+		fmt.Fprintln(stderr, "  wipeme exec [options] <private-link> -- <command> [args...]")
 		fmt.Fprintln(stderr, "  wipeme delete [options] [link]")
 		fmt.Fprint(stderr, "\nCreate a private, one-time link from stdin and optional attachments.\n\n")
 		fmt.Fprintln(stderr, "Commands:")
+		fmt.Fprintln(stderr, "  read      consume, decrypt, and output a private message")
+		fmt.Fprintln(stderr, "  exec      consume and inject decrypted content into a child process")
 		fmt.Fprintln(stderr, "  delete    permanently delete a message using its private link")
 		fmt.Fprintln(stderr, "\nOptions:")
 		flags.PrintDefaults()
@@ -333,10 +411,18 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("wipeme delete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonResult := false
+	o := accessOptions{}
 	flags.StringVar(&settings.ConfigPath, "config", settings.ConfigPath, "configuration file (default: /etc/wipeme/config.yaml then ~/.wipeme/config.yaml)")
 	flags.StringVar(&settings.ServerURL, "server-url", settings.ServerURL, "shared API and public site base URL")
 	flags.StringVar(&settings.APIEndpoint, "api-url", settings.APIEndpoint, "wipe.me message API endpoint")
 	flags.BoolVar(&jsonResult, "json", false, "print structured JSON")
+	flags.StringVar(&o.linkFile, "link-file", "", "read the private link from a file")
+	flags.StringVar(&o.linkEnv, "link-env", "", "read the private link from an environment variable")
+	flags.StringVar(&o.passFile, "passphrase-file", "", "read a passphrase candidate from a file")
+	flags.BoolVar(&o.passStdin, "passphrase-stdin", false, "read a passphrase candidate from stdin")
+	flags.StringVar(&o.passEnv, "passphrase-env", "", "read a passphrase candidate from an environment variable")
+	flags.BoolVar(&o.prompt, "passphrase-prompt", false, "include secure terminal prompting")
+	flags.BoolVar(&o.nonInteractive, "non-interactive", envTruthy("WIPEME_NON_INTERACTIVE"), "never prompt")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: wipeme delete [options] [link]")
 		fmt.Fprint(stderr, "\nDelete a message using its complete private link. If omitted, read the link from stdin.\n\n")
@@ -353,47 +439,126 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if explicitFlags["server-url"] && !explicitFlags["api-url"] && !settings.APIConfigured {
 		settings.APIEndpoint = settings.ServerURL
 	}
-	if flags.NArg() > 1 {
-		return fmt.Errorf("delete accepts at most one private link")
-	}
-	privateLink := ""
-	if flags.NArg() == 1 {
-		privateLink = flags.Arg(0)
-	} else {
+	if flags.NArg() == 0 && o.linkFile == "" && o.linkEnv == "" && !o.passStdin {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
 			return fmt.Errorf("read private link: %w", err)
 		}
-		privateLink = strings.TrimSpace(string(data))
+		args = []string{strings.TrimSpace(string(data))}
+	} else {
+		args = flags.Args()
 	}
-	messageID, secret, err := parsePrivateLink(privateLink)
+	privateLink, err := resolveLink(args, o)
 	if err != nil {
 		return err
 	}
-	deletionKey, err := wipeme.DeriveDeletionKey(messageID, secret)
+	application, err := wipeme.ParseApplicationPrivateLink(privateLink)
+	privateLink = ""
 	if err != nil {
-		return err
+		return fail(exitLink, "invalid private link")
 	}
-	defer wipe(deletionKey[:])
 	client, err := newAPIClient(settings.APIEndpoint)
 	if err != nil {
 		return err
 	}
-	deleted, err := client.DeleteMessage(context.Background(), messageID, wipeme.DeletionKeyHeader(deletionKey))
-	if err != nil {
-		return err
+	deleted := false
+	if !application.CustomPassphrase {
+		messageID, secret, e := application.EnvelopeCryptoParameters()
+		if e != nil {
+			return fail(exitLink, "invalid private link")
+		}
+		deleted, e = deleteWithParameters(client, application.MessageID, messageID, secret)
+		if e != nil {
+			return e
+		}
+	} else {
+		candidates, e := credentialCandidates(application, o, stdin)
+		if e != nil {
+			return e
+		}
+		defer wipeStrings(candidates)
+		for _, candidate := range candidates {
+			id, secret, e := wipeme.DeriveCustomCryptoParameters(candidate, application.MessageID)
+			if e != nil {
+				continue
+			}
+			deleted, e = deleteWithParameters(client, application.MessageID, id, secret)
+			if deleted {
+				break
+			}
+			if e != nil && !isCredentialAPIError(e) {
+				return e
+			}
+		}
+		if !deleted && !o.nonInteractive && (o.prompt || isTerminal(stdin)) {
+			for i := 0; i < 3 && !deleted; i++ {
+				candidate, e := readTTYPassphrase()
+				if e != nil {
+					break
+				}
+				id, secret, e := wipeme.DeriveCustomCryptoParameters(candidate, application.MessageID)
+				candidate = ""
+				if e != nil {
+					continue
+				}
+				deleted, e = deleteWithParameters(client, application.MessageID, id, secret)
+				if e != nil && !isCredentialAPIError(e) {
+					return e
+				}
+			}
+		}
+		if !deleted {
+			if len(candidates) == 0 {
+				return fail(exitCredential, "no passphrase credential is available")
+			}
+			return fail(exitDecrypt, "available credentials did not authorize deletion")
+		}
 	}
-	if !deleted.Deleted {
+	if !deleted {
 		return fmt.Errorf("API returned an invalid deletion response")
 	}
 	if jsonResult {
-		return json.NewEncoder(stdout).Encode(map[string]any{"deleted": true, "message_id": messageID})
+		return json.NewEncoder(stdout).Encode(map[string]any{"deleted": true, "message_id": application.MessageID})
 	}
 	_, err = fmt.Fprintln(stdout, "Deleted.")
 	return err
 }
 
+func deleteWithParameters(client *wipeme.Client, publicID, messageID, secret string) (bool, error) {
+	key, err := wipeme.DeriveDeletionKey(messageID, secret)
+	if err != nil {
+		return false, err
+	}
+	defer wipe(key[:])
+	result, err := client.DeleteMessage(context.Background(), publicID, wipeme.DeletionKeyHeader(key))
+	if err != nil {
+		return false, err
+	}
+	return result.Deleted, nil
+}
+func isCredentialAPIError(err error) bool {
+	if api, ok := wipeme.AsAPIError(err); ok {
+		return api.StatusCode == 401 || api.StatusCode == 403
+	}
+	return false
+}
+
 func collectInput(stdin io.Reader, stderr io.Writer, settings config, paths *[]string) (string, string, func(), error) {
+	if settings.GeneratePass {
+		for _, path := range *paths {
+			if path == "-" {
+				return "", "", nil, fmt.Errorf("--generate-pass conflicts with --attach -")
+			}
+		}
+		if !isTerminal(stdin) {
+			if f, ok := stdin.(*os.File); ok {
+				if info, e := f.Stat(); e == nil && info.Mode()&os.ModeCharDevice == 0 {
+					return "", "", nil, fmt.Errorf("--generate-pass cannot consume ordinary message stdin")
+				}
+			}
+		}
+		return "", "", nil, nil
+	}
 	stdinAttachment := -1
 	for i, path := range *paths {
 		if path == "-" {

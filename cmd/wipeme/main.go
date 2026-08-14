@@ -7,7 +7,7 @@ import (
 	"github.com/wipe-me/cli/internal/cli"
 )
 
-const developmentVersion = "0.2.0-alpha.1-dev"
+const developmentVersion = "0.2.1-alpha.1-dev"
 
 // GoReleaser replaces version with the exact tag using -ldflags -X.
 var version = developmentVersion

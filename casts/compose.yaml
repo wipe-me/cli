@@ -1,0 +1,35 @@
+name: wipeme-casts
+
+services:
+  recorder:
+    build:
+      context: .
+    image: wipe-me/cli-casts:local
+    container_name: wipeme-casts
+    working_dir: /casts
+    command: ["tail", "-f", "/dev/null"]
+    environment:
+      SHELL: /bin/bash
+      TERM: xterm-256color
+      COLORTERM: truecolor
+      WIPEME_SERVER_URL: ${WIPEME_SERVER_URL:-https://wipe.me}
+      WIPEME_API_URL: ${WIPEME_API_URL:-https://wipe.me}
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/casts
+      - asciinema-config:/home/linuxbrew/.config/asciinema
+      - asciinema-state:/home/linuxbrew/.local/state/asciinema
+    networks:
+      - wipe-me-dev
+
+volumes:
+  asciinema-config:
+    name: wipeme-casts-asciinema-config
+  asciinema-state:
+    name: wipeme-casts-asciinema-state
+
+networks:
+  wipe-me-dev:
+    external: true
+    name: ${WIPEME_DEV_NETWORK:-wipe-me-dev_default}

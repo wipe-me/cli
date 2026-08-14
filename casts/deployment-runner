@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set +x
+
+if [[ -z ${WIPEME_PASSPHRASE:-} ]]; then
+  printf 'Pairing failed: WIPEME_PASSPHRASE was not injected.\n' >&2
+  exit 1
+fi
+
+if [[ ! -t 0 || ! -t 1 ]]; then
+  printf 'Pairing failed: confirmation requires the trusted runner terminal.\n' >&2
+  exit 1
+fi
+
+printf 'Human confirmation required in the isolated runner.\n'
+IFS= read -r -s -p 'Pairing passphrase: ' supplied_passphrase
+printf '\n'
+
+if [[ $supplied_passphrase != "$WIPEME_PASSPHRASE" ]]; then
+  supplied_passphrase=
+  printf 'Pairing failed: the passphrase was unavailable or incorrect.\n' >&2
+  exit 1
+fi
+
+supplied_passphrase=
+unset supplied_passphrase
+printf 'Pairing confirmed.\n'
+
+export PS1='\[\033[1;35m\]runner@deploy\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+exec bash --noprofile --norc -i

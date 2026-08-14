@@ -19,6 +19,7 @@ import (
 	"github.com/wipe-me/cli/internal/clipboard"
 	"github.com/wipe-me/cli/internal/media"
 	passwordgen "github.com/wipe-me/cli/internal/password"
+	"github.com/wipe-me/cli/internal/terminalqr"
 	"github.com/wipe-me/sdk/go/wipeme"
 )
 
@@ -62,6 +63,8 @@ type config struct {
 	StdinType      string
 	JSON           bool
 	Copy           bool
+	QR             bool
+	QRInvert       bool
 	Receipt        string
 	ShowVersion    bool
 	GeneratePass   bool
@@ -124,6 +127,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	if settings.JSON && settings.Copy {
 		return fmt.Errorf("--json and --copy cannot be used together")
+	}
+	if settings.JSON && settings.QR {
+		return fail(exitUsage, "--json and --qr cannot be used together")
+	}
+	if settings.QRInvert && !settings.QR {
+		return fail(exitUsage, "--qr-invert requires --qr")
 	}
 	if len(child) > 0 && !settings.GeneratePass {
 		return fail(exitUsage, "a child command requires --generate-pass")
@@ -277,6 +286,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if len(child) > 0 {
 		if settings.LinkFile == "" && !settings.Copy {
 			fmt.Fprintf(stderr, "Private link: %s\n", link)
+			if settings.QR {
+				if err := terminalqr.Write(stderr, link, settings.QRInvert); err != nil {
+					return err
+				}
+			}
 		}
 		sel, err := validateSelectors(stringList{settings.SetEnv})
 		if err != nil {
@@ -295,8 +309,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if settings.JSON {
 		return json.NewEncoder(stdout).Encode(jsonOutput{URL: link, MessageID: publicMessageID, ExpiresAt: expiresAt, Created: created.Created})
 	}
-	_, err = fmt.Fprintln(stdout, link)
-	return err
+	if _, err = fmt.Fprintln(stdout, link); err != nil {
+		return err
+	}
+	if settings.QR {
+		return terminalqr.Write(stdout, link, settings.QRInvert)
+	}
+	return nil
 }
 
 func formatManualPrivateLink(site, messageID string) (string, error) {
@@ -430,6 +449,8 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.StringVar(&settings.StdinType, "type", "", "MIME type override when --attach - is used")
 	flags.BoolVar(&settings.JSON, "json", false, "print structured JSON")
 	flags.BoolVar(&settings.Copy, "copy", settings.Copy, "copy the link instead of printing it")
+	flags.BoolVar(&settings.QR, "qr", false, "print a terminal QR code after the private link")
+	flags.BoolVar(&settings.QRInvert, "qr-invert", false, "render an inverted light-on-dark QR code (requires --qr)")
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
 	flags.BoolVar(&settings.GeneratePass, "generate-pass", false, "securely generate a password as the first text block")

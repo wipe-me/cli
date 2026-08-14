@@ -45,10 +45,49 @@ func TestHelpShowsMainCommandUsage(t *testing.T) {
 	if code != 0 || stdout.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme read [options] <private-link>", "wipeme exec [options]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach", "-generate-pass"} {
+	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme read [options] <private-link>", "wipeme exec [options]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach", "-generate-pass", "-qr", "-qr-invert"} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("help output %q does not contain %q", stderr.String(), expected)
 		}
+	}
+}
+
+func TestQRFlagValidation(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--json", "--qr"}, "--json and --qr cannot be used together"},
+		{[]string{"--qr-invert"}, "--qr-invert requires --qr"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := Run(test.args, strings.NewReader("secret"), &stdout, &stderr, "test")
+		if code != exitUsage || !strings.Contains(stderr.String(), test.want) {
+			t.Fatalf("args=%v code=%d stderr=%q", test.args, code, stderr.String())
+		}
+	}
+}
+
+func TestCreatePrintsQRCodeAfterLink(t *testing.T) {
+	clearConfigEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":%q,"created":true}`, strings.TrimPrefix(r.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--api-url", server.URL, "--site-url", "https://wipe.me", "--qr"}, strings.NewReader("private message"), &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	lines := strings.SplitN(stdout.String(), "\n", 2)
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "https://wipe.me/") {
+		t.Fatalf("link is not the first output line: %q", stdout.String())
+	}
+	if !strings.Contains(lines[1], "\x1b[") || !strings.Contains(lines[1], "▀") {
+		t.Fatalf("QR code did not follow link: %q", stdout.String())
 	}
 }
 

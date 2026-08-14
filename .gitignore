@@ -32,5 +32,6 @@ go.work.sum
 /dist/
 
 # Editor/IDE
+.DS_Store
 # .idea/
 # .vscode/

@@ -1,3 +1,5 @@
+github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=
+github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e/go.mod h1:XV66xRDqSt+GTGFMVlhk3ULuV0y9ZmzeVGR4mloJI3M=
 github.com/wipe-me/sdk/go v0.5.0-alpha.1 h1:A2ifzVsoX2OZAG6HHZP3j7b2q4C1VMDfPImZ4wnsMlA=
 github.com/wipe-me/sdk/go v0.5.0-alpha.1/go.mod h1:Qj13s2da5tpFXGe7/Aq0k/y6gtWg2hJaoKM+3ajXKRw=
 go.yaml.in/yaml/v3 v3.0.4 h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=

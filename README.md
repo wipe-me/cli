@@ -15,8 +15,8 @@ https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
-The source tree reports `0.2.0-alpha.1-dev`; tagged `v0.2.0-alpha.1` builds report
-`0.2.0-alpha.1` through release-time linker flags.
+The source tree reports `0.2.1-alpha.1-dev`; tagged builds report their exact version
+through release-time linker flags.
 
 ## Usage
 
@@ -150,6 +150,12 @@ printf '%s' 'literal secret' | wipeme
 # Copy the link without printing it
 wipeme --copy
 
+# Print a scannable terminal QR code after the link
+wipeme --qr
+
+# Use a light-on-dark QR code when recording or displaying on a dark surface
+wipeme --qr --qr-invert
+
 # Machine-readable creation result
 wipeme --json
 
@@ -161,6 +167,13 @@ printf '%s' "$PRIVATE_LINK" | wipeme delete
 ```
 
 Run `wipeme --help` or `wipeme delete --help` for the complete command reference.
+
+`--qr` leaves the private link as the first output line and prints a compact QR code
+below it. The QR contains the complete private link, including its fragment secret
+for automatic-key messages. Treat screenshots and terminal recordings containing
+it as secrets. Manual-passphrase QR codes contain only the public link; recipients
+must still enter the separately shared passphrase. QR output is intentionally
+incompatible with `--json` so machine-readable stdout remains stable.
 
 ## Configuration
 
@@ -263,7 +276,7 @@ prerelease from `main` with Go 1.25 or newer:
 ```sh
 go install github.com/wipe-me/cli/cmd/wipeme@main
 wipeme --version
-# wipeme 0.2.0-alpha.1-dev
+# wipeme 0.2.1-alpha.1-dev
 ```
 
 Verify any downloaded release artifact against `checksums.txt` before installing it.

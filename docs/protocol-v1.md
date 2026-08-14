@@ -9,4 +9,11 @@ The canonical protocol specification is maintained by the reusable Wipe.me SDK:
 The CLI imports `github.com/wipe-me/sdk/go/wipeme` for Base58 capabilities,
 private-link parsing and formatting, encryption, deletion-key derivation, and API
 requests. Protocol changes belong in the SDK first and reach the CLI through a
-versioned SDK release.
+versioned SDK release. CLI `v0.2.0-alpha.1` targets Go SDK
+`v0.5.0-alpha.1`, including application-link parsing, compact automatic capability
+expansion, manual-passphrase derivation, retrieval, deletion, and chunk progress.
+
+The encrypted manifest message remains an Editor.js-style document. Every CLI
+attachment has a matching `attachment` block whose zero-based `attachmentIndex`
+references the corresponding authenticated SDK attachment frame. Attachment order
+is preserved and attachment metadata is never treated as message text.

@@ -121,6 +121,12 @@ func writeTestConfig(t *testing.T, contents string) string {
 
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
+	if previous, existed := os.LookupEnv("WIPEME_PASSPHRASE"); existed {
+		t.Cleanup(func() { _ = os.Setenv("WIPEME_PASSPHRASE", previous) })
+	} else {
+		t.Cleanup(func() { _ = os.Unsetenv("WIPEME_PASSPHRASE") })
+	}
+	_ = os.Unsetenv("WIPEME_PASSPHRASE")
 	for _, name := range []string{
 		"WIPEME_SERVER_URL",
 		"WIPEME_API_URL",

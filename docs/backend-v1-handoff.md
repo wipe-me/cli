@@ -25,6 +25,11 @@ its own protocol or HTTP client implementation.
 - A per-message Durable Object stores the retirement marker that prevents concurrent
   claims and reuse of claimed, deleted, or expired IDs.
 - Manual deletion uses the locally derived capability; only its verifier is stored.
+- `read` and `exec` retrieve one encrypted envelope and try credential candidates
+  locally; fallback never causes repeated one-time GET requests.
+- CLI attachment inputs are represented as SDK attachment frames plus ordered
+  Editor.js `attachment` blocks. The web recipient synthesizes missing blocks for
+  envelopes produced by older CLI builds.
 
 Contract changes start with a central decision record and OpenAPI update, followed by
 shared fixtures and synchronized client implementations.

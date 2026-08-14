@@ -38,7 +38,7 @@ nfpms:
     vendor: Wipe.me
     homepage: https://wipe.me
     maintainer: Wipe.me <v@swap.io>
-    description: Create private, one-time wipe.me links from your terminal.
+    description: Create, read, and inject private one-time wipe.me messages.
     license: Apache-2.0
     section: utils
     priority: optional
@@ -61,7 +61,7 @@ homebrew_casks:
     binaries:
       - wipeme
     homepage: https://wipe.me
-    description: Create private, one-time wipe.me links from your terminal
+    description: Create, read, and inject private one-time wipe.me messages
     directory: Casks
     skip_upload: auto
     repository:

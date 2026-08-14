@@ -116,7 +116,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return fail(exitUsage, "%v", err)
 	}
 	if settings.ShowVersion {
 		fmt.Fprintf(stdout, "wipeme %s\n", version)
@@ -183,15 +183,34 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		return err
 	}
 	defer cleanupSanitized()
-
-	publicMessageID, publicSecret, err := wipeme.GenerateApplicationCapabilities()
-	if err != nil {
-		return fmt.Errorf("generate message ID: %w", err)
-	}
-	application := wipeme.ApplicationLink{MessageID: publicMessageID, Secret: publicSecret}
-	messageID, secret, err := application.EnvelopeCryptoParameters()
+	message, err = addAttachmentBlocks(message, files)
 	if err != nil {
 		return err
+	}
+
+	manualPassphrase, manualMode := os.LookupEnv("WIPEME_PASSPHRASE")
+	publicMessageID, publicSecret, messageID, secret := "", "", "", ""
+	if manualMode {
+		generatedID, generateErr := passwordgen.Generate(passwordgen.Options{Length: wipeme.CustomMessageIDLength, Alphabet: wipeme.Base58BTCAlphabet, NoRequireEach: true})
+		if generateErr != nil {
+			return fmt.Errorf("generate manual-passphrase message ID: %w", generateErr)
+		}
+		publicMessageID = string(generatedID)
+		wipe(generatedID)
+		messageID, secret, err = wipeme.DeriveCustomCryptoParameters(manualPassphrase, publicMessageID)
+		if err != nil {
+			return fmt.Errorf("WIPEME_PASSPHRASE: %w", err)
+		}
+	} else {
+		publicMessageID, publicSecret, err = wipeme.GenerateApplicationCapabilities()
+		if err != nil {
+			return fmt.Errorf("generate message ID: %w", err)
+		}
+		application := wipeme.ApplicationLink{MessageID: publicMessageID, Secret: publicSecret}
+		messageID, secret, err = application.EnvelopeCryptoParameters()
+		if err != nil {
+			return err
+		}
 	}
 	attachments, closeAttachments, err := openAttachments(files)
 	if err != nil {
@@ -223,12 +242,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if err != nil {
 		return err
 	}
-	link, err := wipeme.FormatApplicationPrivateLink(settings.SiteURL, publicMessageID, publicSecret)
+	link := ""
+	if manualMode {
+		link, err = formatManualPrivateLink(settings.SiteURL, publicMessageID)
+	} else {
+		link, err = wipeme.FormatApplicationPrivateLink(settings.SiteURL, publicMessageID, publicSecret)
+	}
 	if err != nil {
 		return err
 	}
 	if settings.Receipt != "" {
-		receipt := creatorReceipt{CipherVersion: wipeme.ProtocolVersion, URL: link, MessageID: publicMessageID, Secret: publicSecret, ExpiresAt: expiresAt}
+		receiptSecret := publicSecret
+		if manualMode {
+			receiptSecret = manualPassphrase
+		}
+		receipt := creatorReceipt{CipherVersion: wipeme.ProtocolVersion, URL: link, MessageID: publicMessageID, Secret: receiptSecret, ExpiresAt: expiresAt}
 		if err := writeReceipt(settings.Receipt, receipt); err != nil {
 			return fmt.Errorf("message was created at %s, but the creator receipt could not be saved: %w", link, err)
 		}
@@ -269,6 +297,50 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	}
 	_, err = fmt.Fprintln(stdout, link)
 	return err
+}
+
+func formatManualPrivateLink(site, messageID string) (string, error) {
+	parsed, err := url.Parse(site)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid --site-url %q", site)
+	}
+	id, err := wipeme.NormalizeBase58(messageID, wipeme.CustomMessageIDLength)
+	if err != nil {
+		return "", err
+	}
+	grouped, _ := wipeme.GroupBase58(id, 4)
+	parsed.RawQuery, parsed.Fragment = "", ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + grouped
+	return parsed.String(), nil
+}
+
+func addAttachmentBlocks(message string, files []media.File) (string, error) {
+	if len(files) == 0 {
+		return message, nil
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(message), &document); err != nil || document["blocks"] == nil {
+		document = map[string]any{}
+		if message != "" {
+			document["blocks"] = []any{map[string]any{"type": "paragraph", "data": map[string]any{"text": message}}}
+		}
+	}
+	blocks, ok := document["blocks"].([]any)
+	if !ok {
+		blocks = nil
+	}
+	for index := range files {
+		blocks = append(blocks, map[string]any{
+			"type": "attachment",
+			"data": map[string]any{"attachmentIndex": index},
+		})
+	}
+	document["blocks"] = blocks
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return "", fmt.Errorf("encode attachment document: %w", err)
+	}
+	return string(encoded), nil
 }
 
 const progressBarWidth = 12
@@ -432,7 +504,7 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return fail(exitUsage, "%v", err)
 	}
 	explicitFlags := make(map[string]bool)
 	flags.Visit(func(item *flag.Flag) { explicitFlags[item.Name] = true })

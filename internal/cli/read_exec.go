@@ -78,7 +78,7 @@ func runAccess(command string, args []string, stdin io.Reader, stdout, stderr io
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return fail(exitUsage, "%v", err)
 	}
 	explicit := map[string]bool{}
 	f.Visit(func(x *flag.Flag) { explicit[x.Name] = true })

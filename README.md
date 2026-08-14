@@ -15,6 +15,9 @@ https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
+The source tree reports `0.2.0-alpha.1-dev`; tagged `v0.2.0-alpha.1` builds report
+`0.2.0-alpha.1` through release-time linker flags.
+
 ## Usage
 
 ```text
@@ -52,6 +55,26 @@ Available passphrases are tried locally in this order: fragment, `--passphrase-f
 
 `read` consumes the one-time server copy before local decryption, matching the current service protocol. It intentionally exposes selected plaintext on stdout. Use `--output`, `--output-dir`, or `--json` when appropriate; secret files are created with mode 0600 and are never overwritten.
 
+Stable agent-facing exit codes are `2` for invalid usage, `3` for an invalid link,
+`4` when no credential is available, `5` when credentials fail, `6` for retrieval,
+`8` for refused output, and `9` when a child cannot be launched. A started child’s
+own exit status is propagated directly; other failures use `1`.
+
+### Create with a manual passphrase
+
+Set `WIPEME_PASSPHRASE` while creating to select manual-passphrase mode. The
+passphrase may contain arbitrary Unicode text from 8 through 256 characters and is
+not included in the resulting link:
+
+```sh
+WIPEME_PASSPHRASE='previously agreed phrase' wipeme
+# https://wipe.me/aBc1-dEf2
+```
+
+An explicitly set `WIPEME_PASSPHRASE` always selects manual mode. Leave it unset
+to create an automatic `3-3-3#3-3-3-3` link. The environment value is removed
+before any generated-password child command is launched.
+
 ### Generate and transfer a password
 
 ```sh
@@ -72,7 +95,7 @@ $ wipeme --expires 1h
 Enter a private message. Press Ctrl-D on an empty line when finished:
 Temporary credentials
 <Ctrl-D>
-https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG
+https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 ```
 
 The message is read from the terminal rather than a command argument, so its contents are not added to shell history.
@@ -234,11 +257,13 @@ repository.
 
 Prebuilt macOS and Linux archives, SHA-256 checksums, `.deb` packages, and `.rpm`
 packages are attached to tagged
-[GitHub releases](https://github.com/wipe-me/cli/releases). You can also build and
-install directly with Go 1.25 or newer:
+[GitHub releases](https://github.com/wipe-me/cli/releases). You can build the next
+prerelease from `main` with Go 1.25 or newer:
 
 ```sh
-go install github.com/wipe-me/cli/cmd/wipeme@latest
+go install github.com/wipe-me/cli/cmd/wipeme@main
+wipeme --version
+# wipeme 0.2.0-alpha.1-dev
 ```
 
 Verify any downloaded release artifact against `checksums.txt` before installing it.
@@ -298,7 +323,7 @@ metadata can be calculated by the web client after decryption.
 The default create endpoint is:
 
 ```http
-PUT https://wipe.me/api/messages/1K7mQ2xR8VpC
+PUT https://wipe.me/api/messages/1K7mQ2xR8
 Content-Type: application/octet-stream
 X-Wipe-Content-Hash: <sha256>
 X-Wipe-Deletion-Key: <base64url-derived-capability>
@@ -311,7 +336,7 @@ Successful response:
 
 ```json
 {
-  "id": "1K7mQ2xR8VpC",
+  "id": "1K7mQ2xR8",
   "created": true
 }
 ```
@@ -337,9 +362,9 @@ The project is intentionally pure Go (`CGO_ENABLED=0`) for portable macOS and Li
 
 ## Deletion model
 
-The server receives a derived deletion capability during creation and never receives the short secret, Argon2id root, or encryption keys. The same complete private link grants read and deletion authority. `wipeme delete` reconstructs the deletion capability locally from the message ID and secret.
+The server receives a derived deletion capability during creation and never receives the short secret, manual passphrase, Argon2id root, or encryption keys. A complete automatic link grants read and deletion authority. A manual `4-4` link also requires its separately shared passphrase. `wipeme delete` reconstructs the deletion capability locally.
 
-`--receipt` saves the complete private link and its canonical components for the creator. Receipts are created with mode `0600`, refuse to overwrite an existing file, and must be protected like the recipient link itself.
+`--receipt` saves the private link and its canonical creator credential. In manual mode that credential is the passphrase. Receipts are created with mode `0600`, refuse to overwrite an existing file, and must be protected like the recipient link itself.
 
 ## License
 

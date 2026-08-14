@@ -8,6 +8,10 @@ Releases are built by GoReleaser when a `v*` tag is pushed. A release contains:
 - a generated Homebrew cask
 - signed APT and RPM repositories at `packages.wipe.me`
 
+Source builds use the development version in `cmd/wipeme/main.go` (currently
+`0.2.0-alpha.1-dev`). GoReleaser replaces it through `-ldflags -X` with the exact
+tag version, so a `v0.2.0-alpha.1` artifact reports `wipeme 0.2.0-alpha.1`.
+
 ## Package repository setup
 
 Release workflows publish packages to a private Cloudflare R2 bucket exposed
@@ -49,21 +53,22 @@ automatically when the `cli` repository has an Actions secret named
 - `Contents: Read and write`
 
 GoReleaser intentionally skips automatic tap publication for prerelease tags such
-as `v0.1.0-alpha.1`. Publish the generated `dist/wipeme.rb` to
+as `v0.2.0-alpha.1`. Publish the generated `dist/wipeme.rb` to
 `homebrew-tap/Casks/wipeme.rb` after the GitHub prerelease assets are available.
 
 ## Release checklist
 
 1. Ensure `main` is clean and synchronized with `origin/main`.
-2. Run `gofmt`, `go test ./...`, and `go vet ./...`.
+2. Confirm the source development version names the intended next release, then run
+   `gofmt`, `go test ./...`, and `go vet ./...`.
 3. Validate the release configuration with `goreleaser check`.
 4. Build a local snapshot with `goreleaser release --snapshot --clean`.
 5. Inspect the archives, `.deb`, `.rpm`, generated cask, and checksums in `dist/`.
 6. Create and push an annotated tag, for example:
 
    ```sh
-   git tag -a v0.1.0-alpha.1 -m "wipeme v0.1.0-alpha.1"
-   git push origin v0.1.0-alpha.1
+   git tag -a v0.2.0-alpha.1 -m "wipeme v0.2.0-alpha.1"
+   git push origin v0.2.0-alpha.1
    ```
 
 7. Wait for the release workflow and verify every asset on GitHub.

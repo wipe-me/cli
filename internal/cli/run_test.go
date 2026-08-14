@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wipe-me/cli/internal/media"
 	"github.com/wipe-me/sdk/go/wipeme"
 )
 
@@ -57,6 +58,16 @@ func TestAccessHelpReturnsSuccess(t *testing.T) {
 		var out, errs bytes.Buffer
 		if code := Run([]string{command, "--help"}, bytes.NewReader(nil), &out, &errs, "test"); code != 0 || !strings.Contains(errs.String(), "Usage: wipeme "+command) {
 			t.Fatalf("%s code=%d out=%q err=%q", command, code, out.String(), errs.String())
+		}
+	}
+}
+
+func TestInvalidFlagUsesStableUsageExitCode(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, args := range [][]string{{"--not-a-flag"}, {"read", "--not-a-flag"}, {"delete", "--not-a-flag"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, bytes.NewReader(nil), &stdout, &stderr, "test"); code != exitUsage {
+			t.Fatalf("args=%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
 }
@@ -195,6 +206,46 @@ func TestEndToEndUploadCanBeDecrypted(t *testing.T) {
 	}
 }
 
+func TestCreateWithEnvironmentPassphraseUsesManualLink(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("WIPEME_PASSPHRASE", "123123123")
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploaded, _ = io.ReadAll(r.Body)
+		id := strings.TrimPrefix(r.URL.Path, "/api/messages/")
+		if len(id) != wipeme.CustomMessageIDLength {
+			t.Errorf("unexpected public ID %q", id)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":%q,"created":true}`, id)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--api-url", server.URL, "--site-url", "https://wipe.me"}, strings.NewReader("manual message"), &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	link := strings.TrimSpace(stdout.String())
+	if !regexp.MustCompile(`^https://wipe\.me/[1-9A-HJ-NP-Za-km-z]{4}-[1-9A-HJ-NP-Za-km-z]{4}$`).MatchString(link) {
+		t.Fatalf("unexpected manual link %q", link)
+	}
+	application, err := wipeme.ParseApplicationPrivateLink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, secret, err := wipeme.DeriveCustomCryptoParameters("123123123", application.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := wipeme.Decrypt(bytes.NewReader(uploaded), id, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Manifest.Message != "manual message" {
+		t.Fatalf("unexpected message %q", opened.Manifest.Message)
+	}
+}
+
 func TestCreateReadAndOneTimeConsumption(t *testing.T) {
 	clearConfigEnvironment(t)
 	var envelope []byte
@@ -291,12 +342,48 @@ func TestEndToEndUploadSanitizesSupportedAttachment(t *testing.T) {
 	if len(decrypted.Attachments) != 1 {
 		t.Fatalf("unexpected attachments: %#v", decrypted.Attachments)
 	}
+	var document struct {
+		Blocks []struct {
+			Type string `json:"type"`
+			Data struct {
+				AttachmentIndex int `json:"attachmentIndex"`
+			} `json:"data"`
+		} `json:"blocks"`
+	}
+	if err := json.Unmarshal([]byte(decrypted.Manifest.Message), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Blocks) != 2 || document.Blocks[0].Type != "paragraph" || document.Blocks[1].Type != "attachment" || document.Blocks[1].Data.AttachmentIndex != 0 {
+		t.Fatalf("attachment document was not linked correctly: %#v", document.Blocks)
+	}
 	data := decrypted.Attachments[0].Data
 	if bytes.Contains(data, []byte("Exif")) || !bytes.HasSuffix(data, pixelScan) {
 		t.Fatalf("attachment was not sanitized losslessly: %x", data)
 	}
 	if original, err := os.ReadFile(attachmentPath); err != nil || !bytes.Equal(original, jpeg) {
 		t.Fatalf("original attachment changed: %x err=%v", original, err)
+	}
+}
+
+func TestAttachmentOnlyDocumentContainsVisibleBlock(t *testing.T) {
+	file := media.File{Name: "tmp.json", Type: "application/json", Kind: "file", Size: 3}
+	message, err := addAttachmentBlocks("", []media.File{file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Blocks []struct {
+			Type string `json:"type"`
+			Data struct {
+				AttachmentIndex int `json:"attachmentIndex"`
+			} `json:"data"`
+		} `json:"blocks"`
+	}
+	if err := json.Unmarshal([]byte(message), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Blocks) != 1 || document.Blocks[0].Type != "attachment" || document.Blocks[0].Data.AttachmentIndex != 0 {
+		t.Fatalf("unexpected attachment-only document: %s", message)
 	}
 }
 

@@ -1,4 +1,4 @@
-// Command wipeme creates private, one-time links from text and attachments.
+// Command wipeme creates, reads, and injects private one-time messages.
 package main
 
 import (
@@ -7,7 +7,10 @@ import (
 	"github.com/wipe-me/cli/internal/cli"
 )
 
-var version = "dev"
+const developmentVersion = "0.2.0-alpha.1-dev"
+
+// GoReleaser replaces version with the exact tag using -ldflags -X.
+var version = developmentVersion
 
 func main() {
 	os.Exit(cli.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, version))

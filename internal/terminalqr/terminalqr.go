@@ -27,3 +27,20 @@ func Write(writer io.Writer, value string, inverted bool) error {
 	qrterminal.GenerateWithConfig(value, config)
 	return nil
 }
+
+// WriteBig prints value using qrterminal's full-size two-column module renderer.
+func WriteBig(writer io.Writer, value string, inverted bool) error {
+	config := qrterminal.Config{
+		Level:     qrterminal.M,
+		Writer:    writer,
+		BlackChar: qrterminal.BLACK,
+		WhiteChar: qrterminal.WHITE,
+		QuietZone: qrterminal.QUIET_ZONE,
+	}
+	if inverted {
+		config.BlackChar = qrterminal.WHITE
+		config.WhiteChar = qrterminal.BLACK
+	}
+	qrterminal.GenerateWithConfig(value, config)
+	return nil
+}

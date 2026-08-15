@@ -64,6 +64,7 @@ type config struct {
 	JSON           bool
 	Copy           bool
 	QR             bool
+	QRBig          bool
 	QRInvert       bool
 	Receipt        string
 	ShowVersion    bool
@@ -131,8 +132,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if settings.JSON && settings.QR {
 		return fail(exitUsage, "--json and --qr cannot be used together")
 	}
-	if settings.QRInvert && !settings.QR {
-		return fail(exitUsage, "--qr-invert requires --qr")
+	if settings.JSON && settings.QRBig {
+		return fail(exitUsage, "--json and --qr-big cannot be used together")
+	}
+	if settings.QR && settings.QRBig {
+		return fail(exitUsage, "--qr and --qr-big cannot be used together")
+	}
+	if settings.QRInvert && !settings.QR && !settings.QRBig {
+		return fail(exitUsage, "--qr-invert requires --qr or --qr-big")
 	}
 	if len(child) > 0 && !settings.GeneratePass {
 		return fail(exitUsage, "a child command requires --generate-pass")
@@ -286,10 +293,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if len(child) > 0 {
 		if settings.LinkFile == "" && !settings.Copy {
 			fmt.Fprintf(stderr, "Private link: %s\n", link)
-			if settings.QR {
-				if err := terminalqr.Write(stderr, link, settings.QRInvert); err != nil {
-					return err
-				}
+			if err := writeQR(stderr, link, settings); err != nil {
+				return err
 			}
 		}
 		sel, err := validateSelectors(stringList{settings.SetEnv})
@@ -312,8 +317,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if _, err = fmt.Fprintln(stdout, link); err != nil {
 		return err
 	}
+	return writeQR(stdout, link, settings)
+}
+
+const compactQRCaption = "Compact QR: requires a Unicode terminal with block-character support and a monospaced font; use --qr-big if distorted or unreadable."
+
+func writeQR(writer io.Writer, link string, settings config) error {
 	if settings.QR {
-		return terminalqr.Write(stdout, link, settings.QRInvert)
+		if _, err := fmt.Fprintln(writer, compactQRCaption); err != nil {
+			return err
+		}
+		return terminalqr.Write(writer, link, settings.QRInvert)
+	}
+	if settings.QRBig {
+		return terminalqr.WriteBig(writer, link, settings.QRInvert)
 	}
 	return nil
 }
@@ -449,8 +466,9 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.StringVar(&settings.StdinType, "type", "", "MIME type override when --attach - is used")
 	flags.BoolVar(&settings.JSON, "json", false, "print structured JSON")
 	flags.BoolVar(&settings.Copy, "copy", settings.Copy, "copy the link instead of printing it")
-	flags.BoolVar(&settings.QR, "qr", false, "print a terminal QR code after the private link")
-	flags.BoolVar(&settings.QRInvert, "qr-invert", false, "swap QR module colors for the opposite terminal background (requires --qr)")
+	flags.BoolVar(&settings.QR, "qr", false, "print a compact terminal QR code after the private link")
+	flags.BoolVar(&settings.QRBig, "qr-big", false, "print a full-size terminal QR code as a compatibility fallback")
+	flags.BoolVar(&settings.QRInvert, "qr-invert", false, "swap QR module colors (requires --qr or --qr-big)")
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
 	flags.BoolVar(&settings.GeneratePass, "generate-pass", false, "securely generate a password as the first text block")

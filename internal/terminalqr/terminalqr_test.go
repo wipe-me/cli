@@ -9,6 +9,7 @@ import (
 
 	"github.com/makiuchi-d/gozxing"
 	"github.com/makiuchi-d/gozxing/qrcode"
+	qrterminal "github.com/mdp/qrterminal/v3"
 )
 
 func TestWriteProducesCompactQRCodeWithoutForcedANSIColors(t *testing.T) {
@@ -69,6 +70,29 @@ func TestWriteRoundTripsThroughIndependentDecoder(t *testing.T) {
 	}
 }
 
+func TestWriteBigRoundTripsThroughIndependentDecoder(t *testing.T) {
+	const link = "https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7"
+	var output bytes.Buffer
+	if err := WriteBig(&output, link, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), qrterminal.BLACK) || !strings.Contains(output.String(), qrterminal.WHITE) {
+		t.Fatalf("expected qrterminal full-size output, got %q", output.String())
+	}
+
+	bitmap, err := gozxing.NewBinaryBitmapFromImage(renderFullBlocks(t, output.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := qrcode.NewQRCodeReader().DecodeWithoutHints(bitmap)
+	if err != nil {
+		t.Fatalf("decode full-size terminal QR: %v", err)
+	}
+	if got := result.GetText(); got != link {
+		t.Fatalf("decoded %q, want %q", got, link)
+	}
+}
+
 func renderHalfBlocks(t *testing.T, terminal string) image.Image {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(terminal, "\n"), "\n")
@@ -103,6 +127,51 @@ func renderHalfBlocks(t *testing.T, terminal string) image.Image {
 					for px := 0; px < scale; px++ {
 						img.SetGray(x*scale+px, (y*2+moduleY)*scale+py, color.Gray{})
 					}
+				}
+			}
+		}
+	}
+	return img
+}
+
+func renderFullBlocks(t *testing.T, terminal string) image.Image {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(terminal, "\n"), "\n")
+	rows := make([][]bool, len(lines))
+	width := -1
+	for y, line := range lines {
+		for line != "" {
+			switch {
+			case strings.HasPrefix(line, qrterminal.BLACK):
+				rows[y] = append(rows[y], true)
+				line = strings.TrimPrefix(line, qrterminal.BLACK)
+			case strings.HasPrefix(line, qrterminal.WHITE):
+				rows[y] = append(rows[y], false)
+				line = strings.TrimPrefix(line, qrterminal.WHITE)
+			default:
+				t.Fatalf("unexpected full-size terminal QR data in row %d: %q", y, line)
+			}
+		}
+		if width < 0 {
+			width = len(rows[y])
+		} else if len(rows[y]) != width {
+			t.Fatalf("QR row %d has width %d, want %d", y, len(rows[y]), width)
+		}
+	}
+
+	const scale = 8
+	img := image.NewGray(image.Rect(0, 0, width*scale, len(rows)*scale))
+	for i := range img.Pix {
+		img.Pix[i] = 0xff
+	}
+	for y, row := range rows {
+		for x, dark := range row {
+			if !dark {
+				continue
+			}
+			for py := 0; py < scale; py++ {
+				for px := 0; px < scale; px++ {
+					img.SetGray(x*scale+px, y*scale+py, color.Gray{})
 				}
 			}
 		}

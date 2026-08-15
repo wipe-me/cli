@@ -1,0 +1,949 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"image/png"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/makiuchi-d/gozxing"
+	"github.com/makiuchi-d/gozxing/qrcode"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wipe-me/sdk/go/wipeme"
+)
+
+const testAutomaticLink = "https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7"
+
+func TestMCPHelpAndVersionDoNotStartServer(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, test := range []struct {
+		args    []string
+		wantOut string
+		wantErr string
+	}{
+		{[]string{"mcp", "--help"}, "", "Usage: wipeme mcp [options]"},
+		{[]string{"mcp", "--version"}, "wipeme 0.3.0-alpha.1-dev\n", ""},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(test.args, bytes.NewReader(nil), &stdout, &stderr, "0.3.0-alpha.1-dev"); code != 0 {
+			t.Fatalf("args=%v code=%d stderr=%q", test.args, code, stderr.String())
+		}
+		if stdout.String() != test.wantOut || !strings.Contains(stderr.String(), test.wantErr) {
+			t.Fatalf("args=%v stdout=%q stderr=%q", test.args, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestMCPStdioContainsOnlyJSONRPCFraming(t *testing.T) {
+	clearConfigEnvironment(t)
+	recoveryDirectory := filepath.Join(t.TempDir(), "recovery")
+	configPath := writeTestConfig(t, "mcp:\n  recovery_directory: "+recoveryDirectory+"\n")
+	serverInput, clientOutput := io.Pipe()
+	clientInput, serverOutput := io.Pipe()
+	var wire, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		code := Run([]string{"mcp", "--config", configPath}, serverInput, io.MultiWriter(serverOutput, &wire), &stderr, "test")
+		_ = serverOutput.Close()
+		done <- code
+	}()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "stdio-test", Version: "test"}, nil)
+	session, err := client.Connect(context.Background(), &mcpsdk.IOTransport{Reader: clientInput, Writer: clientOutput}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil || len(listed.Tools) != 12 {
+		t.Fatalf("tools=%d err=%v", len(listed.Tools), err)
+	}
+	_ = session.Close()
+	_ = clientOutput.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("MCP wrote diagnostics during normal operation: %q", stderr.String())
+	}
+	for index, line := range bytes.Split(bytes.TrimSpace(wire.Bytes()), []byte{'\n'}) {
+		if len(line) == 0 || !json.Valid(line) {
+			t.Fatalf("stdout frame %d is not JSON: %q", index, line)
+		}
+	}
+}
+
+func TestMCPRegistersOnlyAgentSafeInspectionToolInitially(t *testing.T) {
+	client, cleanup := connectMCPTestClient(t, mcpPolicy{})
+	defer cleanup()
+
+	listed, err := client.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Tools) != 12 {
+		t.Fatalf("unexpected tools: %#v", listed.Tools)
+	}
+	expectedTools := map[string]bool{
+		"inspect_private_link": false, "generate_secret": false, "generate_secret_into_process_env": false,
+		"create_from_files": false, "create_from_env": false, "create_from_process_output": false,
+		"consume_into_files": false, "retry_into_files": false, "consume_into_process_env": false,
+		"retry_process_env": false, "forget_recovery": false, "delete_message": false,
+	}
+	var tool *mcpsdk.Tool
+	for _, candidate := range listed.Tools {
+		if _, expected := expectedTools[candidate.Name]; !expected {
+			t.Fatalf("unexpected MCP tool %q", candidate.Name)
+		}
+		expectedTools[candidate.Name] = true
+		if candidate.Name == "inspect_private_link" {
+			tool = candidate
+		}
+		for _, forbidden := range []string{"read", "plaintext", "consume_into_env", "create_message"} {
+			if candidate.Name == forbidden {
+				t.Fatalf("unsafe tool %q was registered", forbidden)
+			}
+		}
+	}
+	for name, found := range expectedTools {
+		if !found {
+			t.Fatalf("required MCP tool %q was not registered", name)
+		}
+	}
+	if tool == nil {
+		t.Fatal("inspect_private_link was not registered")
+	}
+	if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+		t.Fatalf("unexpected tool annotations: %#v", tool.Annotations)
+	}
+}
+
+func TestMCPInspectPrivateLinkDoesNotEchoCapability(t *testing.T) {
+	client, cleanup := connectMCPTestClient(t, mcpPolicy{})
+	defer cleanup()
+
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "inspect_private_link",
+		Arguments: map[string]any{
+			"private_link": testAutomaticLink,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %#v", result.Content)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, testAutomaticLink) || strings.Contains(text, "7YW-HMf-k9J-CB7") {
+		t.Fatalf("MCP result echoed private capability: %s", text)
+	}
+	for _, expected := range []string{`"valid":true`, `"mode":"automatic"`, `"has_fragment_secret":true`, `"message_id":"1K7mQ2xR8"`} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("MCP result %s does not contain %s", text, expected)
+		}
+	}
+}
+
+func TestMCPInspectRejectsAmbiguousSourcesWithoutEchoingThem(t *testing.T) {
+	client, cleanup := connectMCPTestClient(t, mcpPolicy{})
+	defer cleanup()
+
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "inspect_private_link",
+		Arguments: map[string]any{
+			"private_link": testAutomaticLink,
+			"link_env":     "PRIVATE_LINK",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error")
+	}
+	encoded, _ := json.Marshal(result)
+	if !strings.Contains(string(encoded), "link_source_conflict") || strings.Contains(string(encoded), testAutomaticLink) {
+		t.Fatalf("unsafe or unstable error result: %s", encoded)
+	}
+}
+
+func TestMCPInspectReadsOnlyAllowlistedProtectedFiles(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "link")
+	if err := os.WriteFile(path, []byte(testAutomaticLink+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := mcpPolicy{allowedReadRoots: []string{root}, allowedLinkEnv: map[string]struct{}{}, allowedPassphraseEnv: map[string]struct{}{}, allowedSourceEnv: map[string]struct{}{}}
+	result, err := inspectPrivateLink(policy, inspectPrivateLinkInput{LinkFile: path})
+	if err != nil || !result.Valid || result.MessageID != "1K7mQ2xR8" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := inspectPrivateLink(policy, inspectPrivateLinkInput{LinkFile: filepath.Join(t.TempDir(), "link")}); err == nil || !strings.Contains(err.Error(), "path_outside_allowed_root") {
+		t.Fatalf("expected path allowlist error, got %v", err)
+	}
+}
+
+func TestMCPGenerateSecretReturnsLinkAndDecodableQRWithoutPlaintext(t *testing.T) {
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var err error
+		uploaded, err = io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read upload: %v", err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, mcpPolicy{}, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "generate_secret",
+		Arguments: map[string]any{
+			"length":     24,
+			"chars":      "base58",
+			"include_qr": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %#v", result.Content)
+	}
+	var created mcpCreationResult
+	structured, err := json.Marshal(result.StructuredContent)
+	if err != nil || json.Unmarshal(structured, &created) != nil {
+		t.Fatalf("decode structured result %s: %v", structured, err)
+	}
+	if created.Status != "created" || !created.QRIncluded || created.PrivateLink == "" {
+		t.Fatalf("unexpected creation result: %#v", created)
+	}
+	application, err := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, secret, err := application.EnvelopeCryptoParameters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || len(plaintext) != 24 {
+		t.Fatalf("unexpected generated plaintext envelope")
+	}
+	defer func() { plaintext = "" }()
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(plaintext)) {
+		t.Fatal("generated plaintext leaked into MCP result")
+	}
+
+	var imageContent *mcpsdk.ImageContent
+	for _, content := range result.Content {
+		if image, ok := content.(*mcpsdk.ImageContent); ok {
+			imageContent = image
+		}
+	}
+	if imageContent == nil || imageContent.MIMEType != "image/png" || imageContent.Annotations == nil || len(imageContent.Annotations.Audience) != 1 || imageContent.Annotations.Audience[0] != mcpsdk.Role("user") {
+		t.Fatalf("missing or invalid QR image content: %#v", imageContent)
+	}
+	decodedImage, err := png.Decode(bytes.NewReader(imageContent.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bitmap, err := gozxing.NewBinaryBitmapFromImage(decodedImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedQR, err := qrcode.NewQRCodeReader().DecodeWithoutHints(bitmap)
+	if err != nil {
+		t.Fatalf("decode QR: %v", err)
+	}
+	if decodedQR.GetText() != created.PrivateLink {
+		t.Fatalf("QR decoded %q, want private link", decodedQR.GetText())
+	}
+}
+
+func TestMCPCreateFromEnvDoesNotReturnSourceValue(t *testing.T) {
+	const canary = "MCP_ENV_CANARY_secret-value"
+	t.Setenv("MCP_TEST_API_TOKEN", canary)
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	policy := mcpPolicy{allowedSourceEnv: map[string]struct{}{"MCP_TEST_API_TOKEN": {}}, maxEnvironmentSources: 16}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "create_from_env",
+		Arguments: map[string]any{"variables": []map[string]any{{"source": "MCP_TEST_API_TOKEN"}}},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatal("environment plaintext leaked into MCP result")
+	}
+	var created mcpCreationResult
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &created); err != nil {
+		t.Fatal(err)
+	}
+	application, _ := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || value != canary {
+		t.Fatal("encrypted environment value did not round-trip")
+	}
+}
+
+func TestMCPGenerateSecretSupportsAllowlistedManualPassphraseSource(t *testing.T) {
+	const passphrase = "MCP manual passphrase with spaces"
+	t.Setenv("MCP_TEST_MANUAL_PASS", passphrase)
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+	policy := mcpPolicy{allowedPassphraseEnv: map[string]struct{}{"MCP_TEST_MANUAL_PASS": {}}}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "generate_secret",
+		Arguments: map[string]any{
+			"length":            20,
+			"passphrase_source": map[string]any{"passphrase_env": "MCP_TEST_MANUAL_PASS"},
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(passphrase)) {
+		t.Fatal("manual passphrase leaked into MCP result")
+	}
+	var created mcpCreationResult
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &created); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(created.PrivateLink, "#") {
+		t.Fatalf("manual private link unexpectedly contains a fragment: %q", created.PrivateLink)
+	}
+	application, err := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	if err != nil || !application.CustomPassphrase {
+		t.Fatalf("application=%#v err=%v", application, err)
+	}
+	messageID, secret, err := wipeme.DeriveCustomCryptoParameters(passphrase, application.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || len(generated) != 20 {
+		t.Fatal("generated manual-mode secret did not round-trip")
+	}
+}
+
+func TestMCPCreateFromFilesEncryptsMessageAndAttachments(t *testing.T) {
+	root := t.TempDir()
+	messagePath := filepath.Join(root, "message.txt")
+	attachmentPath := filepath.Join(root, "attachment.txt")
+	if err := os.WriteFile(messagePath, []byte("protected file message"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attachmentPath, []byte("protected attachment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+	policy := mcpPolicy{allowedReadRoots: []string{root}}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "create_from_files",
+		Arguments: map[string]any{
+			"message_file":     messagePath,
+			"attachment_paths": []string{attachmentPath},
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	var created mcpCreationResult
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &created); err != nil || created.AttachmentCount != 1 {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	application, _ := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || message != "protected file message" || len(decrypted.Attachments) != 1 || string(decrypted.Attachments[0].Data) != "protected attachment" {
+		t.Fatal("file inputs did not round-trip through the encrypted envelope")
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte("protected file message")) || bytes.Contains(wire, []byte("protected attachment")) {
+		t.Fatal("file plaintext leaked into MCP result")
+	}
+}
+
+func TestMCPCreateFromApprovedProducerDoesNotReturnProcessOutput(t *testing.T) {
+	const canary = "MCP_PROCESS_CANARY_secret-output"
+	t.Setenv("MCP_HELPER_MODE", "success")
+	t.Setenv("MCP_HELPER_SECRET", canary)
+	profile, err := resolveMCPProcessProfile("test-producer", mcpProcessProfile{
+		Role:              "producer",
+		Executable:        os.Args[0],
+		FixedArgs:         []string{"-test.run=^TestMCPProducerHelperProcess$"},
+		InheritEnv:        []string{"MCP_HELPER_MODE", "MCP_HELPER_SECRET"},
+		AcceptedExitCodes: []int{0},
+		MaxStdoutBytes:    4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	policy := mcpPolicy{processProfiles: map[string]mcpResolvedProcessProfile{"test-producer": profile}}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "create_from_process_output",
+		Arguments: map[string]any{
+			"profile": "test-producer",
+			"output":  map[string]any{"mode": "text"},
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatal("producer stdout leaked into MCP result")
+	}
+	var created mcpCreationResult
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &created); err != nil {
+		t.Fatal(err)
+	}
+	application, _ := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || value != canary {
+		t.Fatal("encrypted producer output did not round-trip")
+	}
+}
+
+func TestMCPProducerFailureDoesNotReturnProcessOutput(t *testing.T) {
+	const canary = "MCP_PROCESS_FAILURE_CANARY"
+	t.Setenv("MCP_HELPER_MODE", "fail")
+	t.Setenv("MCP_HELPER_SECRET", canary)
+	profile, err := resolveMCPProcessProfile("test-producer", mcpProcessProfile{
+		Role:           "producer",
+		Executable:     os.Args[0],
+		FixedArgs:      []string{"-test.run=^TestMCPProducerHelperProcess$"},
+		InheritEnv:     []string{"MCP_HELPER_MODE", "MCP_HELPER_SECRET"},
+		MaxStdoutBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := mcpPolicy{processProfiles: map[string]mcpResolvedProcessProfile{"test-producer": profile}}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "create_from_process_output",
+		Arguments: map[string]any{"profile": "test-producer", "output": map[string]any{"mode": "text"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(result)
+	if !result.IsError || !bytes.Contains(wire, []byte("producer_failed")) || bytes.Contains(wire, []byte(canary)) {
+		t.Fatalf("unsafe producer failure: %s", wire)
+	}
+}
+
+func TestMCPDeleteMessageUsesCapabilityWithoutEchoingIt(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Method != http.MethodDelete || request.Header.Get("X-Wipe-Deletion-Key") == "" {
+			t.Errorf("unexpected deletion request: %s %#v", request.Method, request.Header)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"deleted":true}`))
+	}))
+	defer server.Close()
+
+	client, cleanup := connectMCPTestClientWithConfig(t, mcpPolicy{}, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "delete_message",
+		Arguments: map[string]any{"private_link": testAutomaticLink},
+	})
+	if err != nil || result.IsError || requests != 1 {
+		t.Fatalf("err=%v requests=%d result=%#v", err, requests, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(testAutomaticLink)) || bytes.Contains(wire, []byte("7YW-HMf-k9J-CB7")) || !bytes.Contains(wire, []byte(`"status":"deleted"`)) {
+		t.Fatalf("unsafe deletion result: %s", wire)
+	}
+}
+
+func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *testing.T) {
+	const canary = "MCP_CONSUME_CANARY_private-message"
+	link, envelope, contentHash := encryptedMCPTestMessage(t, canary, []wipeme.AttachmentInput{
+		{Reader: strings.NewReader("first attachment"), Name: "same.txt", Type: "text/plain", Kind: "text", Size: int64(len("first attachment"))},
+		{Reader: strings.NewReader("second attachment"), Name: "same.txt", Type: "text/plain", Kind: "text", Size: int64(len("second attachment"))},
+	})
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	destination := filepath.Join(root, "consumed")
+	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_files",
+		Arguments: map[string]any{
+			"private_link":          link,
+			"destination_directory": destination,
+		},
+	})
+	if err != nil || result.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) || bytes.Contains(wire, []byte("first attachment")) {
+		t.Fatalf("plaintext leaked into consume result: %s", wire)
+	}
+	message, err := os.ReadFile(filepath.Join(destination, "message.txt"))
+	if err != nil || string(message) != canary {
+		t.Fatalf("message=%q err=%v", message, err)
+	}
+	first, err := os.ReadFile(filepath.Join(destination, "same.txt"))
+	if err != nil || string(first) != "first attachment" {
+		t.Fatalf("first attachment=%q err=%v", first, err)
+	}
+	second, err := os.ReadFile(filepath.Join(destination, "002-same.txt"))
+	if err != nil || string(second) != "second attachment" {
+		t.Fatalf("second attachment=%q err=%v", second, err)
+	}
+	for _, path := range []string{destination, filepath.Join(destination, "message.txt"), filepath.Join(destination, "same.txt"), filepath.Join(destination, "002-same.txt")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := os.FileMode(0o600)
+		if info.IsDir() {
+			want = 0o700
+		}
+		if info.Mode().Perm() != want {
+			t.Fatalf("%s permissions=%o want=%o", path, info.Mode().Perm(), want)
+		}
+	}
+}
+
+func TestMCPRetryIntoFilesDoesNotRetrieveAgain(t *testing.T) {
+	const canary = "MCP_RETRY_CANARY_private-message"
+	link, envelope, contentHash := encryptedMCPTestMessage(t, canary, nil)
+	root := t.TempDir()
+	destination := filepath.Join(root, "consumed")
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		if gets == 1 {
+			if err := os.Mkdir(destination, 0o700); err != nil {
+				t.Errorf("create destination race: %v", err)
+			}
+		}
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "consume_into_files",
+		Arguments: map[string]any{"private_link": link, "destination_directory": destination},
+	})
+	if err != nil || first.IsError {
+		t.Fatalf("err=%v result=%#v", err, first)
+	}
+	var pending mcpFileConsumptionOutput
+	structured, _ := json.Marshal(first.StructuredContent)
+	if err := json.Unmarshal(structured, &pending); err != nil || pending.Status != "output_failed" || pending.RecoveryHandle == "" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "retry_into_files",
+		Arguments: map[string]any{
+			"recovery_handle":       pending.RecoveryHandle,
+			"destination_directory": destination,
+		},
+	})
+	if err != nil || retried.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, retried)
+	}
+	message, err := os.ReadFile(filepath.Join(destination, "message.txt"))
+	if err != nil || string(message) != canary {
+		t.Fatalf("message=%q err=%v", message, err)
+	}
+	entries, err := os.ReadDir(recoveryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("successful retry left recovery files: %#v", entries)
+	}
+}
+
+func TestMCPConsumeIntoApprovedProcessDoesNotReturnPlaintext(t *testing.T) {
+	const canary = "MCP_CONSUMER_CANARY_private-message"
+	link, envelope, contentHash := encryptedMCPTestMessage(t, canary, nil)
+	resultFile := filepath.Join(t.TempDir(), "child-result")
+	t.Setenv("MCP_HELPER_MODE", "consumer_success")
+	t.Setenv("MCP_HELPER_RESULT", resultFile)
+	profile, err := resolveMCPProcessProfile("test-consumer", mcpProcessProfile{
+		Role:             "consumer",
+		Executable:       os.Args[0],
+		FixedArgs:        []string{"-test.run=^TestMCPProducerHelperProcess$"},
+		AllowedSecretEnv: []string{"TARGET_SECRET"},
+		InheritEnv:       []string{"MCP_HELPER_MODE", "MCP_HELPER_RESULT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+	policy := mcpPolicy{
+		processProfiles:   map[string]mcpResolvedProcessProfile{"test-consumer": profile},
+		recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5,
+	}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_process_env",
+		Arguments: map[string]any{
+			"private_link": link,
+			"profile":      "test-consumer",
+			"environment":  []map[string]any{{"name": "TARGET_SECRET"}},
+		},
+	})
+	if err != nil || result.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatalf("consumer plaintext leaked into MCP result: %s", wire)
+	}
+	childValue, err := os.ReadFile(resultFile)
+	if err != nil || string(childValue) != canary {
+		t.Fatalf("child value=%q err=%v", childValue, err)
+	}
+}
+
+func TestMCPGeneratedSecretRetryReusesSecretAndReleasesLinkOnlyAfterSuccess(t *testing.T) {
+	resultFile := filepath.Join(t.TempDir(), "child-result")
+	t.Setenv("MCP_HELPER_MODE", "consumer_fail")
+	t.Setenv("MCP_HELPER_RESULT", resultFile)
+	profile, err := resolveMCPProcessProfile("test-consumer", mcpProcessProfile{
+		Role:             "consumer",
+		Executable:       os.Args[0],
+		FixedArgs:        []string{"-test.run=^TestMCPProducerHelperProcess$"},
+		AllowedSecretEnv: []string{"TARGET_SECRET"},
+		InheritEnv:       []string{"MCP_HELPER_MODE", "MCP_HELPER_RESULT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	puts := 0
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			t.Errorf("unexpected method %s", request.Method)
+		}
+		puts++
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	policy := mcpPolicy{
+		processProfiles:   map[string]mcpResolvedProcessProfile{"test-consumer": profile},
+		recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5,
+	}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "generate_secret_into_process_env",
+		Arguments: map[string]any{
+			"profile":          "test-consumer",
+			"environment_name": "TARGET_SECRET",
+			"length":           24,
+			"chars":            "base58",
+		},
+	})
+	if err != nil || first.IsError || puts != 1 {
+		t.Fatalf("err=%v puts=%d result=%#v", err, puts, first)
+	}
+	var pending mcpProcessExecutionOutput
+	structured, _ := json.Marshal(first.StructuredContent)
+	if err := json.Unmarshal(structured, &pending); err != nil || pending.Status != "execution_failed" || pending.RecoveryHandle == "" || pending.PrivateLink != "" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	t.Setenv("MCP_HELPER_MODE", "consumer_success")
+	retried, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "retry_process_env",
+		Arguments: map[string]any{"recovery_handle": pending.RecoveryHandle, "include_qr": true},
+	})
+	if err != nil || retried.IsError || puts != 1 {
+		t.Fatalf("err=%v puts=%d result=%#v", err, puts, retried)
+	}
+	var completed mcpProcessExecutionOutput
+	structured, _ = json.Marshal(retried.StructuredContent)
+	if err := json.Unmarshal(structured, &completed); err != nil || completed.Status != "executed" || completed.PrivateLink == "" || !completed.QRIncluded {
+		t.Fatalf("completed=%#v err=%v", completed, err)
+	}
+	childValue, err := os.ReadFile(resultFile)
+	if err != nil || len(childValue) != 24 {
+		t.Fatalf("child value length=%d err=%v", len(childValue), err)
+	}
+	application, err := wipeme.ParseApplicationPrivateLink(completed.PrivateLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || generated != string(childValue) {
+		t.Fatal("retry did not reuse the originally uploaded generated secret")
+	}
+	wire, _ := json.Marshal(retried)
+	if bytes.Contains(wire, childValue) {
+		t.Fatal("generated secret leaked into successful retry result")
+	}
+	entries, err := os.ReadDir(recoveryDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("recovery entries=%#v err=%v", entries, err)
+	}
+}
+
+func TestMCPForgetGeneratedRecoveryDeletesRemoteBeforeLocalRecord(t *testing.T) {
+	deletes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		deletes++
+		if request.Method != http.MethodDelete || request.Header.Get("X-Wipe-Deletion-Key") == "" {
+			t.Errorf("unexpected request: %s %#v", request.Method, request.Header)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"deleted":true}`))
+	}))
+	defer server.Close()
+	application, err := wipeme.ParseApplicationPrivateLink(testAutomaticLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := mcpPolicy{recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	settings := config{APIEndpoint: server.URL}
+	client, cleanup, store := connectMCPTestClientRuntime(t, policy, settings)
+	defer cleanup()
+	handle, err := store.create(&mcpRecoveryRecord{
+		Type: "generate_process", MessageID: application.MessageID, Secret: application.Secret,
+		Candidates: []string{application.Secret}, PrivateLink: testAutomaticLink, GeneratedSecret: "not-returned", Attempt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "forget_recovery",
+		Arguments: map[string]any{"recovery_handle": handle},
+	})
+	if err != nil || result.IsError || deletes != 1 {
+		t.Fatalf("err=%v deletes=%d result=%#v", err, deletes, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(testAutomaticLink)) || bytes.Contains(wire, []byte("not-returned")) {
+		t.Fatalf("recovery capability leaked: %s", wire)
+	}
+	if _, err := os.Stat(store.recordPath(handle)); !os.IsNotExist(err) {
+		t.Fatalf("recovery record still exists: %v", err)
+	}
+}
+
+func TestMCPProducerHelperProcess(t *testing.T) {
+	mode := os.Getenv("MCP_HELPER_MODE")
+	if mode == "" {
+		return
+	}
+	if strings.HasPrefix(mode, "consumer_") {
+		if mode == "consumer_success" {
+			_ = os.WriteFile(os.Getenv("MCP_HELPER_RESULT"), []byte(os.Getenv("TARGET_SECRET")), 0o600)
+			os.Exit(0)
+		}
+		os.Exit(7)
+	}
+	_, _ = fmt.Fprint(os.Stdout, os.Getenv("MCP_HELPER_SECRET"))
+	if mode == "fail" {
+		os.Exit(7)
+	}
+	os.Exit(0)
+}
+
+func encryptedMCPTestMessage(t *testing.T, message string, attachments []wipeme.AttachmentInput) (string, []byte, string) {
+	t.Helper()
+	application, err := wipeme.ParseApplicationPrivateLink(testAutomaticLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, secret, err := application.EnvelopeCryptoParameters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope bytes.Buffer
+	encrypted, err := wipeme.Encrypt(&envelope, messageID, secret, message, attachments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wipe(encrypted.DeletionKey[:])
+	return testAutomaticLink, envelope.Bytes(), encrypted.ContentHash
+}
+
+func TestMCPConfigRejectsUnknownAndInsecurePolicyFiles(t *testing.T) {
+	clearConfigEnvironment(t)
+	unknown := writeTestConfig(t, "mcp:\n  allowed_reed_roots: []\n")
+	if _, err := loadBaseConfig([]string{"--config", unknown}); err == nil {
+		t.Fatal("expected unknown MCP configuration field to fail")
+	}
+
+	insecure := writeTestConfig(t, "mcp: {}\n")
+	if err := os.Chmod(insecure, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateMCPConfigFiles([]string{"--config", insecure}); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+		t.Fatalf("expected insecure configuration error, got %v", err)
+	}
+}
+
+func connectMCPTestClient(t *testing.T, policy mcpPolicy) (*mcpsdk.ClientSession, func()) {
+	return connectMCPTestClientWithConfig(t, policy, config{})
+}
+
+func connectMCPTestClientWithConfig(t *testing.T, policy mcpPolicy, settings config) (*mcpsdk.ClientSession, func()) {
+	client, cleanup, _ := connectMCPTestClientRuntime(t, policy, settings)
+	return client, cleanup
+}
+
+func connectMCPTestClientRuntime(t *testing.T, policy mcpPolicy, settings config) (*mcpsdk.ClientSession, func(), *mcpRecoveryStore) {
+	t.Helper()
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	if policy.recoveryDirectory == "" {
+		policy.recoveryDirectory = t.TempDir()
+	}
+	if policy.recoveryTTL == 0 {
+		policy.recoveryTTL = 15 * time.Minute
+	}
+	if policy.recoveryMaxAttempts == 0 {
+		policy.recoveryMaxAttempts = 5
+	}
+	store := newMCPRecoveryStore(policy)
+	if err := store.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	serverSession, err := newMCPServer(policy, settings, store, "test").Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "wipeme-test", Version: "test"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		_ = serverSession.Close()
+		t.Fatal(err)
+	}
+	return clientSession, func() {
+		_ = clientSession.Close()
+		_ = serverSession.Close()
+	}, store
+}

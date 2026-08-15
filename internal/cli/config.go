@@ -19,11 +19,39 @@ const (
 )
 
 type yamlConfig struct {
-	ServerURL string `yaml:"server_url"`
-	APIURL    string `yaml:"api_url"`
-	SiteURL   string `yaml:"site_url"`
-	Expires   string `yaml:"expires"`
-	Copy      *bool  `yaml:"copy"`
+	ServerURL string         `yaml:"server_url"`
+	APIURL    string         `yaml:"api_url"`
+	SiteURL   string         `yaml:"site_url"`
+	Expires   string         `yaml:"expires"`
+	Copy      *bool          `yaml:"copy"`
+	MCP       *mcpYAMLConfig `yaml:"mcp"`
+}
+
+type mcpYAMLConfig struct {
+	AllowedReadRoots      []string                     `yaml:"allowed_read_roots"`
+	AllowedWriteRoots     []string                     `yaml:"allowed_write_roots"`
+	AllowedLinkEnv        []string                     `yaml:"allowed_link_env"`
+	AllowedPassphraseEnv  []string                     `yaml:"allowed_passphrase_env"`
+	AllowedSourceEnv      []string                     `yaml:"allowed_source_env"`
+	RecoveryDirectory     string                       `yaml:"recovery_directory"`
+	RecoveryTTL           string                       `yaml:"recovery_ttl"`
+	RecoveryMaxAttempts   *int                         `yaml:"recovery_max_attempts"`
+	MaxEnvironmentSources *int                         `yaml:"max_environment_sources"`
+	ProcessProfiles       map[string]mcpProcessProfile `yaml:"process_profiles"`
+}
+
+type mcpProcessProfile struct {
+	Role              string   `yaml:"role"`
+	Executable        string   `yaml:"executable"`
+	FixedArgs         []string `yaml:"fixed_args"`
+	ArgumentPatterns  []string `yaml:"argument_patterns"`
+	MaxArguments      int      `yaml:"max_arguments"`
+	WorkingDirectory  string   `yaml:"working_directory"`
+	Timeout           string   `yaml:"timeout"`
+	AcceptedExitCodes []int    `yaml:"accepted_exit_codes"`
+	AllowedSecretEnv  []string `yaml:"allowed_secret_env"`
+	InheritEnv        []string `yaml:"inherit_env"`
+	MaxStdoutBytes    int64    `yaml:"max_stdout_bytes"`
 }
 
 func loadBaseConfig(args []string) (config, error) {
@@ -99,6 +127,7 @@ func loadBaseConfig(args []string) (config, error) {
 		ConfigPath:     explicitPath,
 		APIConfigured:  apiConfigured,
 		SiteConfigured: siteConfigured,
+		MCP:            loaded.MCP,
 	}, nil
 }
 
@@ -177,7 +206,49 @@ func mergeYAMLConfig(target *yamlConfig, path string, required bool) error {
 	if value.Copy != nil {
 		target.Copy = value.Copy
 	}
+	if value.MCP != nil {
+		if target.MCP == nil {
+			target.MCP = &mcpYAMLConfig{}
+		}
+		mergeMCPYAMLConfig(target.MCP, value.MCP)
+	}
 	return nil
+}
+
+func mergeMCPYAMLConfig(target, value *mcpYAMLConfig) {
+	if value.AllowedReadRoots != nil {
+		target.AllowedReadRoots = append([]string(nil), value.AllowedReadRoots...)
+	}
+	if value.AllowedWriteRoots != nil {
+		target.AllowedWriteRoots = append([]string(nil), value.AllowedWriteRoots...)
+	}
+	if value.AllowedLinkEnv != nil {
+		target.AllowedLinkEnv = append([]string(nil), value.AllowedLinkEnv...)
+	}
+	if value.AllowedPassphraseEnv != nil {
+		target.AllowedPassphraseEnv = append([]string(nil), value.AllowedPassphraseEnv...)
+	}
+	if value.AllowedSourceEnv != nil {
+		target.AllowedSourceEnv = append([]string(nil), value.AllowedSourceEnv...)
+	}
+	if value.RecoveryDirectory != "" {
+		target.RecoveryDirectory = strings.TrimSpace(value.RecoveryDirectory)
+	}
+	if value.RecoveryTTL != "" {
+		target.RecoveryTTL = strings.TrimSpace(value.RecoveryTTL)
+	}
+	if value.RecoveryMaxAttempts != nil {
+		target.RecoveryMaxAttempts = value.RecoveryMaxAttempts
+	}
+	if value.MaxEnvironmentSources != nil {
+		target.MaxEnvironmentSources = value.MaxEnvironmentSources
+	}
+	if value.ProcessProfiles != nil {
+		target.ProcessProfiles = make(map[string]mcpProcessProfile, len(value.ProcessProfiles))
+		for name, profile := range value.ProcessProfiles {
+			target.ProcessProfiles[name] = profile
+		}
+	}
 }
 
 func parseDuration(input string) (time.Duration, error) {

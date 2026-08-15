@@ -15,7 +15,7 @@ https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
-The source tree reports `0.2.3-alpha.1-dev`; tagged builds report their exact version
+The source tree reports `0.3.0-alpha.1-dev`; tagged builds report their exact version
 through release-time linker flags.
 
 ## Usage
@@ -25,6 +25,7 @@ wipeme [options] [file ...]
 wipeme read [options] <private-link>
 wipeme exec [options] <private-link> -- <command> [args...]
 wipeme delete [options] <private-link>
+wipeme mcp [options]
 ```
 
 Always quote links containing `#`, because shells otherwise interpret the fragment as a comment.
@@ -59,6 +60,75 @@ Stable agent-facing exit codes are `2` for invalid usage, `3` for an invalid lin
 `4` when no credential is available, `5` when credentials fail, `6` for retrieval,
 `8` for refused output, and `9` when a child cannot be launched. A started child’s
 own exit status is propagated directly; other failures use `1`.
+
+### Restricted MCP server
+
+`wipeme mcp` runs a local stdio MCP server for Codex, Claude, and other compatible
+agent hosts. It never exposes a direct-read tool and never returns decrypted text,
+attachment bytes, generated passwords, environment values, or child-process output.
+Install it in Codex with:
+
+```sh
+codex mcp add wipeme -- wipeme mcp
+```
+
+The MCP server exposes these tools:
+
+| Tool | Behavior |
+| --- | --- |
+| `inspect_private_link` | Validate a link locally without network access or echoing it |
+| `generate_secret` | Generate and encrypt a password, returning only its private link |
+| `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
+| `create_from_files` | Encrypt a message file and attachments from allowed read roots |
+| `create_from_env` | Encrypt allowlisted server environment values |
+| `create_from_process_output` | Encrypt stdout from an approved producer profile |
+| `consume_into_files` | Consume into a new mode-0700 directory without returning plaintext |
+| `retry_into_files` | Retry protected file output without another retrieval |
+| `consume_into_process_env` | Consume and inject selected blocks into an approved process |
+| `retry_process_env` | Retry a process operation without retrieving or generating again |
+| `forget_recovery` | Abandon recovery, deleting an unreleased generated message first |
+| `delete_message` | Delete a message using its private capability |
+
+MCP stdin and stdout are reserved exclusively for newline-delimited JSON-RPC while
+the server is running; this does not change stdin/stdout behavior for ordinary CLI
+commands. Filesystem tools are disabled until explicit read/write roots are
+configured. Process tools can only use administrator-defined profiles and execute
+their absolute executable directly without a shell.
+
+```yaml
+mcp:
+  allowed_read_roots: [/workspace, /run/secrets]
+  allowed_write_roots: [/workspace/output]
+  allowed_link_env: [WIPEME_PRIVATE_LINK]
+  allowed_passphrase_env: [WIPEME_PASSPHRASE]
+  allowed_source_env: [DATABASE_PASSWORD, API_TOKEN]
+  recovery_directory: /run/user/1000/wipeme-mcp-recovery
+  recovery_ttl: 15m
+  recovery_max_attempts: 5
+  max_environment_sources: 16
+  process_profiles:
+    database-migrate:
+      role: consumer
+      executable: /usr/local/bin/database-tool
+      fixed_args: [migrate]
+      argument_patterns: ['^[A-Za-z0-9._/-]+$']
+      max_arguments: 4
+      timeout: 2m
+      accepted_exit_codes: [0]
+      allowed_secret_env: [DATABASE_PASSWORD]
+      inherit_env: [HOME, PATH]
+      max_stdout_bytes: 65536
+```
+
+Configuration containing MCP policy must be owned by the current user or root and
+must not be writable by group or others. Recovery records are local, mode-0600
+capability material in a mode-0700 directory. They permit safe retries after the
+server-side one-time message has already been consumed.
+
+MCP results containing private links or inline PNG QR images are bearer
+capabilities and may be retained in host transcripts. See
+[`docs/mcp-server-v1.md`](docs/mcp-server-v1.md) for the complete security model,
+tool schemas, profile rules, recovery behavior, and stable error codes.
 
 ### Create with a manual passphrase
 
@@ -286,7 +356,7 @@ prerelease from `main` with Go 1.25 or newer:
 ```sh
 go install github.com/wipe-me/cli/cmd/wipeme@main
 wipeme --version
-# wipeme 0.2.3-alpha.1-dev
+# wipeme 0.3.0-alpha.1-dev
 ```
 
 Verify any downloaded release artifact against `checksums.txt` before installing it.

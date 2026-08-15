@@ -45,7 +45,7 @@ func TestHelpShowsMainCommandUsage(t *testing.T) {
 	if code != 0 || stdout.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme read [options] <private-link>", "wipeme exec [options]", "wipeme delete [options] [link]", "Commands:", "-config", "-server-url", "-attach", "-generate-pass", "-qr", "-qr-big", "-qr-invert"} {
+	for _, expected := range []string{"wipeme [options] [file ...]", "wipeme read [options] <private-link>", "wipeme exec [options]", "wipeme delete [options] [link]", "wipeme mcp [options]", "Commands:", "-config", "-server-url", "-attach", "-generate-pass", "-qr", "-qr-big", "-qr-invert"} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("help output %q does not contain %q", stderr.String(), expected)
 		}

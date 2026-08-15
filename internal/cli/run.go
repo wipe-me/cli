@@ -55,6 +55,7 @@ type config struct {
 	ConfigPath     string
 	APIConfigured  bool
 	SiteConfigured bool
+	MCP            *mcpYAMLConfig
 	Expires        time.Duration
 	Message        string
 	MessageFile    string
@@ -95,7 +96,9 @@ type creatorReceipt struct {
 // Run executes the CLI and returns a process exit code.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
 	var err error
-	if len(args) > 0 && (args[0] == "read" || args[0] == "exec") {
+	if len(args) > 0 && args[0] == "mcp" {
+		err = runMCP(args[1:], stdin, stdout, stderr, version)
+	} else if len(args) > 0 && (args[0] == "read" || args[0] == "exec") {
 		err = runAccess(args[0], args[1:], stdin, stdout, stderr)
 	} else if len(args) > 0 && args[0] == "delete" {
 		err = runDelete(args[1:], stdin, stdout, stderr)
@@ -484,11 +487,13 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 		fmt.Fprintln(stderr, "  wipeme read [options] <private-link>")
 		fmt.Fprintln(stderr, "  wipeme exec [options] <private-link> -- <command> [args...]")
 		fmt.Fprintln(stderr, "  wipeme delete [options] [link]")
+		fmt.Fprintln(stderr, "  wipeme mcp [options]")
 		fmt.Fprint(stderr, "\nCreate a private, one-time link from stdin and optional attachments.\n\n")
 		fmt.Fprintln(stderr, "Commands:")
 		fmt.Fprintln(stderr, "  read      consume, decrypt, and output a private message")
 		fmt.Fprintln(stderr, "  exec      consume and inject decrypted content into a child process")
 		fmt.Fprintln(stderr, "  delete    permanently delete a message using its private link")
+		fmt.Fprintln(stderr, "  mcp       run the restricted agent-safe MCP server over stdio")
 		fmt.Fprintln(stderr, "\nOptions:")
 		flags.PrintDefaults()
 	}

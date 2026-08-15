@@ -450,7 +450,7 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	flags.BoolVar(&settings.JSON, "json", false, "print structured JSON")
 	flags.BoolVar(&settings.Copy, "copy", settings.Copy, "copy the link instead of printing it")
 	flags.BoolVar(&settings.QR, "qr", false, "print a terminal QR code after the private link")
-	flags.BoolVar(&settings.QRInvert, "qr-invert", false, "render an inverted light-on-dark QR code (requires --qr)")
+	flags.BoolVar(&settings.QRInvert, "qr-invert", false, "swap QR module colors for the opposite terminal background (requires --qr)")
 	flags.StringVar(&settings.Receipt, "receipt", "", "save a mode-0600 creator receipt; refuses to overwrite")
 	flags.BoolVar(&settings.ShowVersion, "version", false, "print the version")
 	flags.BoolVar(&settings.GeneratePass, "generate-pass", false, "securely generate a password as the first text block")

@@ -86,7 +86,7 @@ func TestCreatePrintsQRCodeAfterLink(t *testing.T) {
 	if len(lines) != 2 || !strings.HasPrefix(lines[0], "https://wipe.me/") {
 		t.Fatalf("link is not the first output line: %q", stdout.String())
 	}
-	if !strings.Contains(lines[1], "\x1b[") || !strings.Contains(lines[1], "▀") {
+	if strings.Contains(lines[1], "\x1b[") || !strings.ContainsAny(lines[1], "█▀▄") {
 		t.Fatalf("QR code did not follow link: %q", stdout.String())
 	}
 }

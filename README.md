@@ -15,7 +15,7 @@ https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
-The source tree reports `0.2.1-alpha.1-dev`; tagged builds report their exact version
+The source tree reports `0.2.2-alpha.1-dev`; tagged builds report their exact version
 through release-time linker flags.
 
 ## Usage
@@ -153,7 +153,7 @@ wipeme --copy
 # Print a scannable terminal QR code after the link
 wipeme --qr
 
-# Use a light-on-dark QR code when recording or displaying on a dark surface
+# Swap QR module colors if the terminal background needs it
 wipeme --qr --qr-invert
 
 # Machine-readable creation result
@@ -173,7 +173,10 @@ below it. The QR contains the complete private link, including its fragment secr
 for automatic-key messages. Treat screenshots and terminal recordings containing
 it as secrets. Manual-passphrase QR codes contain only the public link; recipients
 must still enter the separately shared passphrase. QR output is intentionally
-incompatible with `--json` so machine-readable stdout remains stable.
+incompatible with `--json` so machine-readable stdout remains stable. The renderer
+uses the terminal's existing foreground and background instead of forcing ANSI
+colors; use `--qr-invert` if the module orientation does not suit the terminal
+theme or recording.
 
 ## Configuration
 
@@ -276,7 +279,7 @@ prerelease from `main` with Go 1.25 or newer:
 ```sh
 go install github.com/wipe-me/cli/cmd/wipeme@main
 wipeme --version
-# wipeme 0.2.1-alpha.1-dev
+# wipeme 0.2.2-alpha.1-dev
 ```
 
 Verify any downloaded release artifact against `checksums.txt` before installing it.

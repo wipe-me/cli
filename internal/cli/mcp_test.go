@@ -119,7 +119,7 @@ func TestMCPStdioContainsOnlyJSONRPCFraming(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed, err := session.ListTools(context.Background(), nil)
-	if err != nil || len(listed.Tools) != 12 {
+	if err != nil || len(listed.Tools) != 15 {
 		t.Fatalf("tools=%d err=%v", len(listed.Tools), err)
 	}
 	_ = session.Close()
@@ -145,14 +145,15 @@ func TestMCPRegistersOnlyAgentSafeInspectionToolInitially(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 12 {
+	if len(listed.Tools) != 15 {
 		t.Fatalf("unexpected tools: %#v", listed.Tools)
 	}
 	expectedTools := map[string]bool{
 		"inspect_private_link": false, "generate_secret": false, "generate_secret_into_process_env": false,
 		"create_from_files": false, "create_from_env": false, "create_from_process_output": false,
 		"consume_into_files": false, "retry_into_files": false, "consume_into_process_env": false,
-		"retry_process_env": false, "forget_recovery": false, "delete_message": false,
+		"retry_process_env": false, "consume_into_env_file": false, "retry_into_env_file": false,
+		"generate_secret_into_env_file": false, "forget_recovery": false, "delete_message": false,
 	}
 	var tool *mcpsdk.Tool
 	for _, candidate := range listed.Tools {
@@ -721,6 +722,229 @@ func TestMCPRetryIntoFilesDoesNotRetrieveAgain(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("successful retry left recovery files: %#v", entries)
+	}
+}
+
+func TestMCPEnvironmentFileEncodersUseExplicitNativeFormats(t *testing.T) {
+	mappings := []mcpEnvironmentMapping{{Name: "PRIVATE_KEY", Block: 0}}
+	values := map[string]string{"PRIVATE_KEY": "line 1\nline '$2' \\\""}
+	tests := []struct {
+		format string
+		want   string
+	}{
+		{mcpEnvFormatDotenv, "PRIVATE_KEY=\"line 1\\nline '\\$2' \\\\\\\"\"\n"},
+		{mcpEnvFormatShell, "export PRIVATE_KEY='line 1\nline '\"'\"'$2'\"'\"' \\\"'\n"},
+		{mcpEnvFormatSystemd, "PRIVATE_KEY=\"line 1\nline '\\$2' \\\\\\\"\"\n"},
+	}
+	for _, test := range tests {
+		encoded, err := encodeMCPEnvFile(test.format, mappings, values)
+		if err != nil || string(encoded) != test.want {
+			t.Fatalf("format=%s encoded=%q want=%q err=%v", test.format, encoded, test.want, err)
+		}
+	}
+	if _, err := encodeMCPEnvFile(mcpEnvFormatDocker, mappings, values); err == nil || !strings.Contains(err.Error(), "cannot contain newlines") {
+		t.Fatalf("Docker encoder accepted a multiline value: %v", err)
+	}
+	values["PRIVATE_KEY"] = "single-line=$literal#value"
+	encoded, err := encodeMCPEnvFile(mcpEnvFormatDocker, mappings, values)
+	if err != nil || string(encoded) != "PRIVATE_KEY=single-line=$literal#value\n" {
+		t.Fatalf("Docker encoded=%q err=%v", encoded, err)
+	}
+}
+
+func TestMCPEnvironmentFileOverwriteIsExplicitAndRejectsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "application.env")
+	if err := os.WriteFile(destination, []byte("OLD=value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	policy := mcpPolicy{allowedWriteRoots: []string{root}}
+	if _, err := validateMCPEnvFileDestination(destination, false, policy); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("no-overwrite validation accepted an existing file: %v", err)
+	}
+	path, err := validateMCPEnvFileDestination(destination, true, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomicPrivateFile(path, []byte("NEW=value\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(destination)
+	info, statErr := os.Stat(destination)
+	mode := os.FileMode(0)
+	if info != nil {
+		mode = info.Mode().Perm()
+	}
+	if err != nil || statErr != nil || string(data) != "NEW=value\n" || mode != 0o600 {
+		t.Fatalf("data=%q mode=%v readErr=%v statErr=%v", data, mode, err, statErr)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateMCPEnvFileDestination(destination, true, policy); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("overwrite validation accepted a symlink: %v", err)
+	}
+}
+
+func TestMCPConsumeIntoEnvFileRetriesWithoutAnotherRetrieval(t *testing.T) {
+	const firstCanary = "MCP_ENV_FILE_CANARY_first"
+	const secondCanary = "MCP_ENV_FILE_CANARY_second"
+	document, err := encodeTextBlocks([]string{firstCanary, secondCanary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, envelope, contentHash := encryptedMCPTestMessage(t, document, nil)
+	root := t.TempDir()
+	destination := filepath.Join(root, "application.env")
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		if gets == 1 {
+			if err := os.WriteFile(destination, []byte("race"), 0o600); err != nil {
+				t.Errorf("create destination race: %v", err)
+			}
+		}
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_env_file",
+		Arguments: map[string]any{
+			"private_link": link, "destination_file": destination,
+			"environment": []map[string]any{{"name": "PRIVATE_KEY", "block": 0}, {"name": "API_TOKEN", "block": 1}},
+		},
+	})
+	if err != nil || first.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, first)
+	}
+	var pending mcpEnvFileOutput
+	structured, _ := json.Marshal(first.StructuredContent)
+	if err := json.Unmarshal(structured, &pending); err != nil || pending.Status != "output_failed" || pending.RecoveryHandle == "" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	wire, _ := json.Marshal(first)
+	if bytes.Contains(wire, []byte(firstCanary)) || bytes.Contains(wire, []byte(secondCanary)) {
+		t.Fatalf("environment plaintext leaked into pending result: %s", wire)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "retry_into_env_file",
+		Arguments: map[string]any{"recovery_handle": pending.RecoveryHandle},
+	})
+	if err != nil || retried.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, retried)
+	}
+	data, err := os.ReadFile(destination)
+	want := "PRIVATE_KEY=\"" + firstCanary + "\"\nAPI_TOKEN=\"" + secondCanary + "\"\n"
+	if err != nil || string(data) != want {
+		t.Fatalf("environment file=%q want=%q err=%v", data, want, err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("environment file permissions=%v err=%v", info.Mode().Perm(), err)
+	}
+	wire, _ = json.Marshal(retried)
+	if bytes.Contains(wire, []byte(firstCanary)) || bytes.Contains(wire, []byte(secondCanary)) {
+		t.Fatalf("environment plaintext leaked into retry result: %s", wire)
+	}
+}
+
+func TestMCPGenerateSecretIntoEnvFileRetriesSameSecretAndThenReleasesLink(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "generated.env")
+	puts := 0
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			t.Errorf("unexpected method %s", request.Method)
+		}
+		puts++
+		uploaded, _ = io.ReadAll(request.Body)
+		if puts == 1 {
+			if err := os.WriteFile(destination, []byte("race"), 0o600); err != nil {
+				t.Errorf("create destination race: %v", err)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "generate_secret_into_env_file",
+		Arguments: map[string]any{
+			"destination_file": destination, "format": "docker", "length": 24, "chars": "base58",
+			"environment": []map[string]any{{"name": "DATABASE_PASSWORD", "block": 0}},
+		},
+	})
+	if err != nil || first.IsError || puts != 1 {
+		t.Fatalf("err=%v puts=%d result=%#v", err, puts, first)
+	}
+	var pending mcpEnvFileOutput
+	structured, _ := json.Marshal(first.StructuredContent)
+	if err := json.Unmarshal(structured, &pending); err != nil || pending.Status != "output_failed" || pending.RecoveryHandle == "" || pending.PrivateLink != "" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "retry_into_env_file",
+		Arguments: map[string]any{"recovery_handle": pending.RecoveryHandle, "include_qr": true},
+	})
+	if err != nil || retried.IsError || puts != 1 {
+		t.Fatalf("err=%v puts=%d result=%#v", err, puts, retried)
+	}
+	var completed mcpEnvFileOutput
+	structured, _ = json.Marshal(retried.StructuredContent)
+	if err := json.Unmarshal(structured, &completed); err != nil || completed.Status != "written" || completed.PrivateLink == "" || !completed.QRIncluded {
+		t.Fatalf("completed=%#v err=%v", completed, err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || !bytes.HasPrefix(data, []byte("DATABASE_PASSWORD=")) {
+		t.Fatalf("generated environment file=%q err=%v", data, err)
+	}
+	generated := strings.TrimSuffix(strings.TrimPrefix(string(data), "DATABASE_PASSWORD="), "\n")
+	if len(generated) != 24 {
+		t.Fatalf("generated secret length=%d", len(generated))
+	}
+	application, err := wipeme.ParseApplicationPrivateLink(completed.PrivateLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decryptedSecret, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || decryptedSecret != generated {
+		t.Fatal("environment retry did not reuse the originally uploaded generated secret")
+	}
+	wire, _ := json.Marshal(retried)
+	if bytes.Contains(wire, []byte(generated)) {
+		t.Fatal("generated secret leaked into environment-file retry result")
 	}
 }
 

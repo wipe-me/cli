@@ -18,7 +18,7 @@ import (
 	"github.com/wipe-me/sdk/go/wipeme"
 )
 
-const mcpInstructions = "Wipe.me tools consume one-time messages and never return plaintext, decrypted attachments, generated secrets, passphrases, environment values, or process output. Process tools execute only administrator-approved profiles. Private links and QR images are bearer capabilities and may be retained by the MCP host transcript. Retrieval consumes the remote message; retry-capable tools use protected local recovery records."
+const mcpInstructions = "Wipe.me tools consume one-time messages and never return plaintext, decrypted attachments, generated secrets, passphrases, environment values, or process output. Process tools execute only administrator-approved profiles. Private links and QR images are bearer capabilities and may be retained by the MCP host transcript. Retrieval consumes the remote message; retry-capable tools use protected local recovery records. Prefer environment-file tools for commands that may be retried or repeated and for Docker or Docker Compose. Use process tools only for one immediate profile-approved execution when a persistent private file is undesirable."
 
 const (
 	mcpAccessHost       = "host"
@@ -189,6 +189,7 @@ func newMCPServer(policy mcpPolicy, settings config, store *mcpRecoveryStore, ve
 	registerMCPCreationTools(server, policy, settings)
 	registerMCPDeleteTool(server, policy, settings)
 	registerMCPFileConsumptionTools(server, policy, settings, store)
+	registerMCPEnvFileTools(server, policy, settings, store)
 	registerMCPProcessConsumptionTools(server, policy, settings, store)
 	registerMCPForgetRecoveryTool(server, settings, store)
 

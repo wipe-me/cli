@@ -87,13 +87,16 @@ The MCP server exposes these tools:
 | --- | --- |
 | `inspect_private_link` | Validate a link locally without network access or echoing it |
 | `generate_secret` | Generate and encrypt a password, returning only its private link |
-| `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
+| `generate_secret_into_env_file` | Generate, upload, and write the same secret to an environment file; release the link only after success |
 | `create_from_files` | Encrypt a message file and attachments permitted by the active access policy |
 | `create_from_env` | Encrypt server environment values permitted by the active access policy |
 | `create_from_process_output` | Encrypt stdout from an approved producer profile |
+| `consume_into_env_file` | Consume selected text blocks into a private environment file |
+| `retry_into_env_file` | Retry consumed or generated environment-file output without another retrieval or generation |
 | `consume_into_files` | Consume into a new mode-0700 directory without returning plaintext |
 | `retry_into_files` | Retry protected file output without another retrieval |
 | `consume_into_process_env` | Consume and inject selected blocks into an approved process |
+| `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
 | `retry_process_env` | Retry a process operation without retrieving or generating again |
 | `forget_recovery` | Abandon recovery, deleting an unreleased generated message first |
 | `delete_message` | Delete a message using its private capability |
@@ -103,9 +106,93 @@ the server is running; this does not change stdin/stdout behavior for ordinary C
 commands. In `restricted` mode, filesystem tools are disabled until explicit
 read/write roots are configured. In the default `host` mode, they may use absolute
 paths allowed by the OS and MCP host. Both modes retain regular-file checks,
-no-overwrite output, private permissions, and traversal-safe handling. Process
-tools always require administrator-defined profiles and execute their absolute
-executable directly without a shell.
+private permissions, traversal-safe handling, and no-overwrite defaults. Only the
+environment-file tools accept an explicit `overwrite: true`, and then replace only
+a regular non-symlink file atomically. Process tools always require
+administrator-defined profiles and execute their absolute executable directly
+without a shell.
+
+Environment-file tools support `dotenv` (default), `docker`, `shell`, and `systemd`.
+The default dotenv encoder uses quoted escapes for conventional dotenv readers.
+Use `docker` for raw `docker run --env-file` syntax; Docker values containing CR or
+LF are rejected because that format cannot represent them faithfully. `shell`
+produces POSIX-sourceable `export` assignments, while `systemd` follows the
+`EnvironmentFile=` grammar. Files are atomically written with mode 0600.
+
+For agent-run commands, prefer `consume_into_env_file` over
+`consume_into_process_env`. The server consumes the remote message once and leaves
+a private local file that can be reused across validation, startup retries, and
+multiple commands. The process tool is intentionally the narrower option for one
+immediate approved execution when persisting a secret file is undesirable.
+
+Treat the local file as the consumed secret: keep it outside source control, grant
+only the intended OS user/container access, and delete it when reuse is no longer
+needed.
+
+For a regular host command, ask the MCP tool for `shell` format. This representative
+tool call maps message blocks to variable names without returning either value:
+
+```json
+{
+  "link_file": "/workspace/private/message.link",
+  "destination_file": "/workspace/private/application.env",
+  "environment": [
+    { "name": "DATABASE_PASSWORD", "block": 0 },
+    { "name": "API_TOKEN", "block": 1 }
+  ],
+  "format": "shell",
+  "overwrite": false
+}
+```
+
+The private file conceptually contains the following, with the bracketed values
+written locally from decrypted blocks and never included in the MCP response:
+
+```sh
+export DATABASE_PASSWORD='[decrypted block 0]'
+export API_TOKEN='[decrypted block 1]'
+```
+
+Source it directly into the command's child environment:
+
+```sh
+sh -c '. /workspace/private/application.env && exec ./bin/migrate'
+```
+
+For Docker, consume into a different message's destination using
+`"format": "docker"`:
+
+```json
+{
+  "link_file": "/workspace/private/docker-message.link",
+  "destination_file": "/workspace/private/container.env",
+  "environment": [
+    { "name": "DATABASE_PASSWORD", "block": 0 },
+    { "name": "API_TOKEN", "block": 1 }
+  ],
+  "format": "docker",
+  "overwrite": false
+}
+```
+
+Then reuse it without another Wipe.me consumption:
+
+```sh
+docker run --rm --env-file /workspace/private/container.env example/app migrate
+docker run --rm --env-file /workspace/private/container.env example/app verify
+```
+
+For Docker Compose 2.30 or newer, use the raw reader so `$`, quotes, and backslashes
+remain literal:
+
+```yaml
+services:
+  app:
+    image: example/app
+    env_file:
+      - path: /workspace/private/container.env
+        format: raw
+```
 
 ```yaml
 mcp:

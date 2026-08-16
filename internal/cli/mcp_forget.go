@@ -39,7 +39,7 @@ func cleanupMCPRecovery(ctx context.Context, store *mcpRecoveryStore, settings c
 		}
 		expired := time.Now().After(record.ExpiresAt) || record.Attempt >= store.maxAttempts
 		if expired {
-			if record.Type == "generate_process" {
+			if isGeneratedMCPRecovery(record.Type) {
 				deleted, absent, deleteErr := deleteGeneratedRecoveryRemote(ctx, record, settings)
 				if deleteErr == nil && (deleted || absent) {
 					_ = lease.delete()
@@ -82,7 +82,7 @@ func registerMCPForgetRecoveryTool(server *mcpsdk.Server, settings config, store
 			return nil, forgetRecoveryResult{}, errors.New("recovery_corrupt: recovery record is invalid")
 		}
 		defer record.wipe()
-		if record.Type != "generate_process" {
+		if !isGeneratedMCPRecovery(record.Type) {
 			if err := lease.delete(); err != nil {
 				return nil, forgetRecoveryResult{}, errors.New("recovery_corrupt: recovery record could not be removed")
 			}

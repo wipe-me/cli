@@ -86,7 +86,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "consume_into_process_env",
 		Title:       "Consume into an approved process",
-		Description: "Consume a one-time message and inject selected text blocks into an administrator-approved process without returning plaintext or process output.",
+		Description: "For one immediate run, consume a one-time message and inject selected text blocks into an administrator-approved process without returning plaintext or process output. Prefer consume_into_env_file for repeatable or retry-prone commands.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input consumeIntoProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
 		profile, err := validateMCPProfileCall(policy, input.Profile, "consumer", input.Arguments)
@@ -157,7 +157,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "generate_secret_into_process_env",
 		Title:       "Generate and inject a private secret",
-		Description: "Generate one password, upload it, and inject the same value into an approved process. The private link is released only after an accepted process exit.",
+		Description: "For one immediate run, generate one password, upload it, and inject the same value into an approved process. Prefer generate_secret_into_env_file for repeatable or retry-prone commands.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input generateSecretIntoProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
 		profile, err := validateMCPProfileCall(policy, input.Profile, "consumer", input.Arguments)
@@ -244,7 +244,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "retry_process_env",
 		Title:       "Retry an approved process",
-		Description: "Retry a consumed-message or generated-secret process operation from protected local recovery without another retrieval or secret generation.",
+		Description: "Retry a single-run process operation from protected local recovery without another retrieval or secret generation. Prefer reusable environment files when multiple executions may be needed.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input retryProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
 		lease, record, err := store.acquire(input.RecoveryHandle)

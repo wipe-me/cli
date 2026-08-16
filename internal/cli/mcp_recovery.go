@@ -29,6 +29,9 @@ type mcpRecoveryRecord struct {
 	Arguments        []string                `json:"arguments,omitempty"`
 	Environment      []mcpEnvironmentMapping `json:"environment,omitempty"`
 	EnvironmentName  string                  `json:"environment_name,omitempty"`
+	DestinationFile  string                  `json:"destination_file,omitempty"`
+	EnvFileFormat    string                  `json:"env_file_format,omitempty"`
+	Overwrite        bool                    `json:"overwrite,omitempty"`
 	GeneratedSecret  string                  `json:"generated_secret,omitempty"`
 	PrivateLink      string                  `json:"private_link,omitempty"`
 	MessageExpiresAt string                  `json:"message_expires_at,omitempty"`
@@ -135,20 +138,24 @@ func (store *mcpRecoveryStore) acquire(handle string) (*mcpRecoveryLease, *mcpRe
 		return nil, nil, err
 	}
 	if time.Now().After(record.ExpiresAt) {
-		if record.Type != "generate_process" {
+		if !isGeneratedMCPRecovery(record.Type) {
 			_ = lease.delete()
 		}
 		lease.release()
 		return nil, nil, errors.New("recovery_expired: recovery record has expired")
 	}
 	if record.Attempt >= store.maxAttempts {
-		if record.Type != "generate_process" {
+		if !isGeneratedMCPRecovery(record.Type) {
 			_ = lease.delete()
 		}
 		lease.release()
 		return nil, nil, errors.New("recovery_exhausted: recovery attempt limit was reached")
 	}
 	return lease, record, nil
+}
+
+func isGeneratedMCPRecovery(recordType string) bool {
+	return recordType == "generate_process" || recordType == "generate_env_file"
 }
 
 func (store *mcpRecoveryStore) read(handle string) (*mcpRecoveryRecord, error) {

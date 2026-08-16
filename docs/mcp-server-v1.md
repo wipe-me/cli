@@ -25,15 +25,39 @@ wipeme exec [options] <private-link> -- <command> [args...]
 wipeme delete [options] [link]
 ```
 
-### 1.1 Explicit non-goals
+### 1.1 Preferred execution workflow
+
+For commands that may require validation, retries, restarts, or repeated runs,
+prefer `consume_into_env_file` over `consume_into_process_env`:
+
+1. Consume the remote message exactly once into a mode-`0600` environment file.
+2. Let the agent or operator run one or more commands using that file without
+   another Wipe.me retrieval and without asking for the secret again.
+3. Keep the file out of source control and delete it when the workflow is complete.
+
+This separates destructive one-time retrieval from fallible process execution and
+avoids a retry loop where every failed run would otherwise need another message.
+It deliberately creates a reusable local secret, so filesystem permissions and
+cleanup become the operator's responsibility. Direct process tools remain useful
+for a deliberate single execution when no persistent plaintext file is acceptable.
+
+Docker is the recommended execution boundary for agent-run applications because it
+provides a reproducible command and explicit filesystem/process scope. It is not a
+secret vault: users with Docker daemon access can inspect container environments.
+Use `--rm`, limit daemon access, and remove the environment file after its required
+reuse window.
+
+### 1.2 Explicit non-goals
 
 - No `create_message` tool accepts literal message text. Model-supplied text is
   already visible to the model and MCP transcript.
-- No `consume_into_env` tool claims to modify the MCP host or agent shell. A child
-  MCP server process cannot modify its parent's environment. Secrets go directly
-  into approved child processes instead.
+- No tool claims to modify the already-running MCP host or agent environment. An
+  MCP server process cannot modify its parent's environment. Environment-file
+  tools write only an explicit private destination; process tools inject secrets
+  only into approved child processes.
 - No general-purpose plaintext session, environment handle, arbitrary command
-  executor, shell export, clipboard mutation or direct-read tool is exposed.
+  executor, shell export returned through MCP, clipboard mutation or direct-read
+  tool is exposed.
 - No streamable HTTP transport is included in v1. Local filesystem and process
   capabilities remain local to the stdio server.
 - No stdin attachment or passphrase source is exposed because stdin is the MCP
@@ -99,10 +123,12 @@ These requirements are mandatory and are not agent-configurable:
 5. Host access accepts absolute paths permitted by the OS. Restricted access also
    requires paths to remain inside configured read and write roots.
 6. Secret output files use mode `0600`; private directories use mode `0700`.
-7. Existing outputs are never overwritten.
+7. Outputs default to no-overwrite. Only environment-file tools accept explicit
+   overwrite, and they may atomically replace only a regular non-symlink file.
 8. Process execution uses configured profiles and `exec` directly, never a shell.
 9. Successful process execution always wipes recovery state.
-10. Successful file materialization always wipes recovery state.
+10. Successful file and environment-file materialization always wipes recovery
+    state.
 11. Failed deletion of a generated pending message retains recovery state so that
     deletion can be retried.
 12. Manual passphrases may come only from a protected file or environment source
@@ -287,9 +313,10 @@ mcp:
 ```
 
 A recovery handle is scoped to the local OS user and original operation type. It
-cannot change to a different process profile. Validated process arguments and block
-mappings may change on retry. Expired, corrupted, exhausted and successful records
-are wiped. Cleanup runs at startup, periodically, and at normal shutdown.
+cannot change to a different process profile. Validated process arguments, block
+mappings, environment-file destination, format, and overwrite choice may change on
+retry. Expired, corrupted, exhausted and successful records are wiped. Cleanup runs
+at startup, periodically, and at normal shutdown.
 
 ## 7. Tool: `inspect_private_link`
 
@@ -555,10 +582,194 @@ counter and retains recovery until its limit or TTL. Success returns
 `ConsumeIntoFilesResult`; another failure returns
 `PendingFileConsumptionResult`.
 
-## 15. Tool: `consume_into_process_env`
+## 15. Tool: `consume_into_env_file`
+
+Consumes a message and writes selected compatible text blocks to an explicit
+private environment file without returning their values.
+
+```ts
+type EnvironmentFileFormat = "dotenv" | "docker" | "shell" | "systemd";
+
+type ConsumeIntoEnvFileInput = LinkSource & {
+  passphrase_sources?: PassphraseSource[];
+  destination_file: string;
+  environment: Array<{
+    name: string;
+    block?: number;                // omitted: first compatible text block
+  }>;
+  format?: EnvironmentFileFormat; // default dotenv
+  overwrite?: boolean;            // default false
+}
+```
+
+- The destination and all mappings are validated before retrieval.
+- Names must be valid environment names, must be unique, and must not start with
+  `WIPEME_`. Environment-file mappings do not require a process profile.
+- `overwrite: false` refuses an existing destination. `overwrite: true` may
+  replace only a regular, non-symlink destination.
+- Output is staged beside the destination, synchronized, and installed atomically
+  with mode `0600`. No-overwrite installation does not clobber a file created by
+  a concurrent process.
+- The four encoders are deliberately separate:
+  - `dotenv` writes double-quoted assignments and escapes backslash, double quote,
+    dollar, newline, carriage return, and tab for conventional dotenv readers.
+  - `docker` writes raw `NAME=value` lines compatible with
+    `docker run --env-file`; CR, LF, and NUL are refused because Docker's format
+    cannot represent them faithfully.
+  - `shell` writes POSIX-sourceable `export NAME='value'` assignments with safe
+    single-quote handling and supports multiline values.
+  - `systemd` writes UTF-8 double-quoted assignments following the
+    `EnvironmentFile=` grammar and supports multiline values.
+- All encoders reject NUL. The result never contains an encoded line or value.
+
+### 15.1 Host-command example
+
+The following arguments map text blocks to names while keeping values out of MCP:
+
+```json
+{
+  "link_file": "/workspace/private/message.link",
+  "destination_file": "/workspace/private/application.env",
+  "environment": [
+    { "name": "DATABASE_PASSWORD", "block": 0 },
+    { "name": "API_TOKEN", "block": 1 }
+  ],
+  "format": "shell",
+  "overwrite": false
+}
+```
+
+The tool privately materializes assignments equivalent to:
+
+```sh
+export DATABASE_PASSWORD='[decrypted block 0]'
+export API_TOKEN='[decrypted block 1]'
+```
+
+The agent can inject the entire file into a child command without reading it:
+
+```sh
+sh -c '. /workspace/private/application.env && exec ./bin/migrate'
+```
+
+The shell and child can access the plaintext by design; MCP results cannot.
+
+### 15.2 Docker and Compose example
+
+For a Docker consumer, request the Docker encoder explicitly:
+
+```json
+{
+  "link_file": "/workspace/private/docker-message.link",
+  "destination_file": "/workspace/private/container.env",
+  "environment": [
+    { "name": "DATABASE_PASSWORD", "block": 0 },
+    { "name": "API_TOKEN", "block": 1 }
+  ],
+  "format": "docker",
+  "overwrite": false
+}
+```
+
+```sh
+docker run --rm --env-file /workspace/private/container.env example/app migrate
+docker run --rm --env-file /workspace/private/container.env example/app verify
+```
+
+Both commands reuse the single consumed local file. For Compose 2.30 or newer:
+
+```yaml
+services:
+  app:
+    image: example/app
+    env_file:
+      - path: /workspace/private/container.env
+        format: raw
+```
+
+The file is intentionally reusable across `docker run` invocations or Compose
+restarts until the operator deletes it.
+
+```ts
+interface EnvironmentFileResult {
+  status: "written" | "output_failed";
+  consumed?: boolean;
+  remote_message_created?: boolean;
+  destination_file?: string;
+  format?: EnvironmentFileFormat;
+  variables_written?: number;
+  attempt: number;
+  retryable: boolean;
+  recovery_handle?: string;
+  retry_until?: string;
+  recovery_deleted: boolean;
+  private_link?: string;          // successful generated-secret operation only
+  message_id?: string;
+  expires_at?: string;
+  qr_included?: boolean;
+  receipt_written?: boolean;
+  link_file_written?: boolean;
+}
+```
+
+An output or encoding failure after retrieval returns `output_failed` and a
+recovery handle. It never performs another retrieval automatically.
+
+## 16. Tool: `retry_into_env_file`
+
+Retries either a consumed-message or generated-secret environment-file operation
+from protected local recovery.
+
+```ts
+interface RetryIntoEnvFileInput {
+  recovery_handle: string;
+  destination_file?: string;
+  environment?: Array<{ name: string; block?: number }>;
+  format?: EnvironmentFileFormat;
+  overwrite?: boolean;
+  include_qr?: boolean;           // generated-secret recovery only
+}
+```
+
+Omitted fields reuse the validated original settings. Revised fields receive full
+validation. Consumed-message retries decrypt the retained envelope and make no
+second GET. Generated-secret retries reuse the exact original generated value and
+make no second upload. A successful generated retry releases its previously hidden
+private link and optional inline PNG QR; consumed-message retries never return a
+link or QR.
+
+## 17. Tool: `generate_secret_into_env_file`
+
+Generates one password, uploads it, writes that exact value to an environment file,
+and releases the private link only after file installation succeeds.
+
+```ts
+interface GenerateSecretIntoEnvFileInput extends CreationControls {
+  length?: number;
+  chars?: GenerateSecretInput["chars"];
+  alphabet?: string;
+  no_require_each?: boolean;
+  destination_file: string;
+  environment: Array<{ name: string; block?: 0 }>;
+  format?: EnvironmentFileFormat; // default dotenv
+  overwrite?: boolean;            // default false
+}
+```
+
+The generated message contains one text block, so mappings may omit `block` or use
+only block `0`. Multiple names may intentionally receive the same generated value.
+On output failure, the link and QR remain hidden behind recovery. Successful retry
+reuses the same secret; abandonment, expiration, or exhausted retries delete the
+unreleased remote message before wiping local recovery whenever the service is
+reachable.
+
+## 18. Tool: `consume_into_process_env`
 
 Consumes a message and injects selected compatible text blocks into an approved
 consumer process.
+
+This is the single-execution path. Prefer `consume_into_env_file` when a command
+may need retries, validation runs, restarts, Docker/Compose, or multiple invocations.
 
 ```ts
 type ConsumeIntoProcessEnvInput = LinkSource & {
@@ -602,9 +813,13 @@ interface ProcessExecutionResult {
 }
 ```
 
-## 16. Tool: `retry_process_env`
+## 19. Tool: `retry_process_env`
 
 Retries either a consumed-message or generated-secret process operation.
+
+Process retry exists to recover a single intended operation without consuming or
+generating again. It should not be used as a general execution loop; materialize a
+private environment file when the secret must survive multiple runs.
 
 ```ts
 interface RetryProcessEnvInput {
@@ -626,7 +841,7 @@ interface RetryProcessEnvInput {
   hidden private link and optional QR.
 - For consumed-message operations, no link or QR is returned.
 
-## 17. Tool: `forget_recovery`
+## 20. Tool: `forget_recovery`
 
 Explicitly abandons a pending recovery operation.
 
@@ -647,7 +862,7 @@ generated-secret records whose private link has not been released, first delete 
 remote message using the retained deletion capability. If deletion fails
 transiently, retain the record and return `delete_pending`.
 
-## 18. Tool: `delete_message`
+## 21. Tool: `delete_message`
 
 Deletes a message using its automatic fragment or separately sourced manual
 passphrase.
@@ -669,7 +884,7 @@ There is no `confirm` argument. Mark the tool destructive and let the MCP host a
 human approval. Deletion is effectively idempotent and safe to retry. Never return
 or log the deletion capability.
 
-## 19. MCP-only omissions from current CLI help
+## 22. MCP-only omissions from current CLI help
 
 The following current CLI features are deliberately absent or transformed:
 
@@ -692,7 +907,7 @@ manual mode, repeated attachments, block selectors, link sources, passphrase fil
 environment sources, link files, receipts, metadata cleanup and stable sanitized
 failure categories are retained where safe.
 
-## 20. Tool annotations and approval guidance
+## 23. Tool annotations and approval guidance
 
 | Tool | Read-only | Destructive | Idempotent | Open-world |
 |---|---:|---:|---:|---:|
@@ -704,6 +919,9 @@ failure categories are retained where safe.
 | `create_from_process_output` | no | yes | no | yes |
 | `consume_into_files` | no | yes | no | yes |
 | `retry_into_files` | no | yes | no | no |
+| `consume_into_env_file` | no | yes | no | yes |
+| `retry_into_env_file` | no | yes | no | no |
+| `generate_secret_into_env_file` | no | yes | no | yes |
 | `consume_into_process_env` | no | yes | no | yes |
 | `retry_process_env` | no | yes | no | profile-dependent |
 | `forget_recovery` | no | yes | yes | generated records may contact server |
@@ -713,7 +931,7 @@ Annotations are advisory. The server must enforce every safety property itself.
 Recommended host policy is prompt approval for all tools except
 `inspect_private_link`.
 
-## 21. Errors
+## 24. Errors
 
 All tool failures use stable codes and sanitized messages. Expected operation
 outcomes such as a child exit, retryable file error or already-absent deletion are
@@ -750,7 +968,7 @@ Errors never include tool argument dumps, private links, fragments, passphrases,
 environment values, decrypted metadata, ciphertext details, producer output or raw
 API bodies.
 
-## 22. Configuration
+## 25. Configuration
 
 Existing precedence remains flags, environment, user YAML, system YAML and built-in
 defaults. MCP has no per-call endpoint override. Extend YAML with a strict `mcp`
@@ -815,7 +1033,7 @@ Do not accept serialized process profiles or allowed roots from a single environ
 variable. Configuration files containing policy must be owned by the current user
 or root and not writable by group or others.
 
-## 23. Internal architecture
+## 26. Internal architecture
 
 Refactor behavior rather than invoking the CLI as a subprocess:
 
@@ -830,6 +1048,7 @@ internal/core typed operations
   ├── consume/decrypt
   ├── delete
   ├── file materialization
+  ├── environment-file encoders
   ├── process profiles/execution
   └── recovery lifecycle
           │
@@ -840,7 +1059,7 @@ github.com/wipe-me/sdk/go/wipeme
 The human CLI and MCP adapter call the same typed core. Do not shell out to
 `wipeme`, duplicate SDK link validation, or fork cryptographic behavior.
 
-## 24. Tests and completion criteria
+## 27. Tests and completion criteria
 
 Implementation is complete only when all of the following pass:
 
@@ -859,31 +1078,33 @@ Implementation is complete only when all of the following pass:
 10. Tests cover process profile validation before retrieval, argv execution without
     a shell, minimal environment inheritance, protected names, timeout, signal,
     launch failure, nonzero exit and accepted exit codes.
-11. Tests prove failed process and file operations retain recovery, retries make no
-    second GET, and successful retries wipe recovery.
+11. Tests prove failed process, file and environment-file operations retain
+    recovery, retries make no second GET, and successful retries wipe recovery.
 12. Tests prove generated-secret retries reuse the exact same secret and release the
-    link/QR only after accepted execution.
+    link/QR only after accepted execution or successful file installation.
 13. Tests prove abandoning an unreleased generated secret deletes its remote message
     before wiping recovery.
-14. Tests decode normal inline PNG QR output and compare the exact private link.
-15. Tests cover recovery TTL, attempt exhaustion, startup cleanup, corrupt records,
+14. Tests verify dotenv, Docker, POSIX shell, and systemd encoding with quotes,
+    backslashes, dollars, multiline values and refused NUL/Docker newlines.
+15. Tests decode normal inline PNG QR output and compare the exact private link.
+16. Tests cover recovery TTL, attempt exhaustion, startup cleanup, corrupt records,
     permissions and concurrent handle use.
-16. Race tests ensure one recovery handle cannot execute concurrently.
-17. Tests prove host mode uses OS-visible absolute paths and inherited environment
+17. Race tests ensure one recovery handle cannot execute concurrently.
+18. Tests prove host mode uses OS-visible absolute paths and inherited environment
     without Wipe.me allowlists, while restricted mode denies access outside its
     configured roots and environment allowlists.
-18. Tests prove `--access` overrides YAML and invalid access modes fail at startup.
-19. Run `gofmt`, `go test ./...`, `go test -race ./...` and `go vet ./...`.
-20. Run MCP protocol conformance/inspector tests against the built binary.
-21. Run end-to-end Docker tests on the development network for create, consume,
+19. Tests prove `--access` overrides YAML and invalid access modes fail at startup.
+20. Run `gofmt`, `go test ./...`, `go test -race ./...` and `go vet ./...`.
+21. Run MCP protocol conformance/inspector tests against the built binary.
+22. Run end-to-end Docker tests on the development network for create, consume,
     retry, delete, generated execution and QR flows.
-20. Inspect Docker and MCP logs for known canary secrets.
-21. Build GoReleaser snapshots and verify static macOS/Linux AMD64/ARM64 builds plus
+23. Inspect Docker and MCP logs for known canary secrets.
+24. Build GoReleaser snapshots and verify static macOS/Linux AMD64/ARM64 builds plus
     `.deb`, `.rpm`, Homebrew and direct archive layouts.
-22. Verify Codex stdio configuration and at least one independent MCP client before
+25. Verify Codex stdio configuration and at least one independent MCP client before
     release.
 
-## 25. Distribution and documentation
+## 28. Distribution and documentation
 
 - Target `v0.3.0-alpha.1` because MCP adds a new public interface and security model.
 - `wipeme --help` adds `mcp` as a command; `wipeme mcp --help` documents stdio use
@@ -896,9 +1117,12 @@ Implementation is complete only when all of the following pass:
 - Release notes must explicitly state that MCP QR images and returned private links
   are bearer capabilities and may be retained by host transcripts.
 
-## 26. Normative references
+## 29. Normative references
 
 - [Official OpenAI Codex MCP documentation](https://developers.openai.com/codex/mcp/)
 - [Official OpenAI skills documentation](https://developers.openai.com/codex/skills/)
 - [MCP tool specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
 - [Official MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk)
+- [Docker `--env-file` syntax](https://docs.docker.com/reference/cli/docker/container/run/#set-environment-variables--e---env---env-file)
+- [Docker Compose `env_file` raw format](https://docs.docker.com/reference/compose-file/services/#format)
+- [systemd `EnvironmentFile=` syntax](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment)

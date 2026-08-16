@@ -20,7 +20,13 @@ import (
 
 const mcpInstructions = "Wipe.me tools consume one-time messages and never return plaintext, decrypted attachments, generated secrets, passphrases, environment values, or process output. Process tools execute only administrator-approved profiles. Private links and QR images are bearer capabilities and may be retained by the MCP host transcript. Retrieval consumes the remote message; retry-capable tools use protected local recovery records."
 
+const (
+	mcpAccessHost       = "host"
+	mcpAccessRestricted = "restricted"
+)
+
 type mcpPolicy struct {
+	accessMode            string
 	allowedReadRoots      []string
 	allowedWriteRoots     []string
 	allowedLinkEnv        map[string]struct{}
@@ -50,7 +56,7 @@ type mcpResolvedProcessProfile struct {
 type inspectPrivateLinkInput struct {
 	PrivateLink string `json:"private_link,omitempty" jsonschema:"Direct private link. Prefer link_file for agent workflows."`
 	LinkFile    string `json:"link_file,omitempty" jsonschema:"Absolute path to a protected file containing the private link."`
-	LinkEnv     string `json:"link_env,omitempty" jsonschema:"Allowlisted server environment variable containing the private link."`
+	LinkEnv     string `json:"link_env,omitempty" jsonschema:"Server environment variable containing the private link; restricted mode requires it in allowed_link_env."`
 }
 
 type inspectPrivateLinkResult struct {
@@ -66,12 +72,14 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer, version st
 	flags := flag.NewFlagSet("wipeme mcp", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := ""
+	accessMode := ""
 	showVersion := false
 	flags.StringVar(&configPath, "config", "", "configuration file")
+	flags.StringVar(&accessMode, "access", "", "access policy: host or restricted (default host)")
 	flags.BoolVar(&showVersion, "version", false, "print the version and exit before starting MCP")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: wipeme mcp [options]")
-		fmt.Fprintln(stderr, "\nRun the restricted Wipe.me MCP server over stdio.\n\nOptions:")
+		fmt.Fprintln(stderr, "\nRun the agent-safe Wipe.me MCP server over stdio.\n\nOptions:")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -99,7 +107,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer, version st
 	if err := validateMCPConfigFiles(configArgs); err != nil {
 		return err
 	}
-	policy, err := resolveMCPPolicy(settings.MCP)
+	policy, err := resolveMCPPolicy(settings.MCP, accessMode)
 	if err != nil {
 		return err
 	}
@@ -154,7 +162,7 @@ func newMCPServer(policy mcpPolicy, settings config, store *mcpRecoveryStore, ve
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:        "wipeme",
 		Title:       "Wipe.me agent-safe tools",
-		Description: "Restricted local tools for creating and applying private one-time messages without returning plaintext.",
+		Description: "Local tools for creating and applying private one-time messages without returning plaintext.",
 		Version:     version,
 		WebsiteURL:  "https://wipe.me",
 	}, &mcpsdk.ServerOptions{
@@ -233,7 +241,7 @@ func resolveMCPLinkValues(policy mcpPolicy, privateLink, linkFile, linkEnv strin
 		return privateLink, nil
 	}
 	if linkFile != "" {
-		path, err := validateMCPReadFile(linkFile, policy.allowedReadRoots)
+		path, err := policy.validateReadFile(linkFile)
 		if err != nil {
 			return "", fmt.Errorf("%w: link file is unavailable", err)
 		}
@@ -244,7 +252,7 @@ func resolveMCPLinkValues(policy mcpPolicy, privateLink, linkFile, linkEnv strin
 		defer wipe(data)
 		return trimLine(string(data)), nil
 	}
-	if _, allowed := policy.allowedLinkEnv[linkEnv]; !allowed {
+	if !mcpEnvironmentAllowed(policy, policy.allowedLinkEnv, linkEnv) {
 		return "", errors.New("invalid_link: link environment source is not allowed")
 	}
 	value, ok := os.LookupEnv(linkEnv)
@@ -268,8 +276,9 @@ func classifyPrivateLinkError(value string) string {
 	return "invalid_fragment"
 }
 
-func resolveMCPPolicy(value *mcpYAMLConfig) (mcpPolicy, error) {
+func resolveMCPPolicy(value *mcpYAMLConfig, accessOverride string) (mcpPolicy, error) {
 	policy := mcpPolicy{
+		accessMode:            mcpAccessHost,
 		allowedLinkEnv:        map[string]struct{}{},
 		allowedPassphraseEnv:  map[string]struct{}{},
 		allowedSourceEnv:      map[string]struct{}{},
@@ -283,29 +292,40 @@ func resolveMCPPolicy(value *mcpYAMLConfig) (mcpPolicy, error) {
 		return mcpPolicy{}, fmt.Errorf("resolve MCP recovery directory: %w", err)
 	}
 	policy.recoveryDirectory = filepath.Join(home, ".local", "state", "wipeme", "mcp-recovery")
+	if value != nil && value.AccessMode != "" {
+		policy.accessMode = strings.ToLower(strings.TrimSpace(value.AccessMode))
+	}
+	if accessOverride != "" {
+		policy.accessMode = strings.ToLower(strings.TrimSpace(accessOverride))
+	}
+	if policy.accessMode != mcpAccessHost && policy.accessMode != mcpAccessRestricted {
+		return mcpPolicy{}, fmt.Errorf("MCP access policy must be host or restricted")
+	}
 	if value == nil {
 		return policy, nil
 	}
-	if policy.allowedReadRoots, err = normalizeMCPRoots(value.AllowedReadRoots); err != nil {
-		return mcpPolicy{}, err
-	}
-	if policy.allowedWriteRoots, err = normalizeMCPRoots(value.AllowedWriteRoots); err != nil {
-		return mcpPolicy{}, err
-	}
-	for _, item := range []struct {
-		values []string
-		target map[string]struct{}
-		label  string
-	}{
-		{value.AllowedLinkEnv, policy.allowedLinkEnv, "allowed_link_env"},
-		{value.AllowedPassphraseEnv, policy.allowedPassphraseEnv, "allowed_passphrase_env"},
-		{value.AllowedSourceEnv, policy.allowedSourceEnv, "allowed_source_env"},
-	} {
-		for _, name := range item.values {
-			if !envName.MatchString(name) {
-				return mcpPolicy{}, fmt.Errorf("mcp.%s contains an invalid environment name", item.label)
+	if policy.accessMode == mcpAccessRestricted {
+		if policy.allowedReadRoots, err = normalizeMCPRoots(value.AllowedReadRoots); err != nil {
+			return mcpPolicy{}, err
+		}
+		if policy.allowedWriteRoots, err = normalizeMCPRoots(value.AllowedWriteRoots); err != nil {
+			return mcpPolicy{}, err
+		}
+		for _, item := range []struct {
+			values []string
+			target map[string]struct{}
+			label  string
+		}{
+			{value.AllowedLinkEnv, policy.allowedLinkEnv, "allowed_link_env"},
+			{value.AllowedPassphraseEnv, policy.allowedPassphraseEnv, "allowed_passphrase_env"},
+			{value.AllowedSourceEnv, policy.allowedSourceEnv, "allowed_source_env"},
+		} {
+			for _, name := range item.values {
+				if !envName.MatchString(name) {
+					return mcpPolicy{}, fmt.Errorf("mcp.%s contains an invalid environment name", item.label)
+				}
+				item.target[name] = struct{}{}
 			}
-			item.target[name] = struct{}{}
 		}
 	}
 	if value.RecoveryDirectory != "" {
@@ -455,11 +475,15 @@ func normalizeAbsolutePath(value string) (string, error) {
 }
 
 func validateMCPReadFile(value string, roots []string) (string, error) {
+	return validateMCPReadFileWithAccess(value, roots, false)
+}
+
+func validateMCPReadFileWithAccess(value string, roots []string, hostAccess bool) (string, error) {
 	path, err := normalizeAbsolutePath(value)
 	if err != nil {
 		return "", errors.New("path_outside_allowed_root")
 	}
-	if !pathWithinRoots(path, roots) {
+	if !hostAccess && !pathWithinRoots(path, roots) {
 		return "", errors.New("path_outside_allowed_root")
 	}
 	info, err := os.Lstat(path)
@@ -467,10 +491,25 @@ func validateMCPReadFile(value string, roots []string) (string, error) {
 		return "", errors.New("output_refused")
 	}
 	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || !pathWithinRoots(resolved, roots) {
+	if err != nil || (!hostAccess && !pathWithinRoots(resolved, roots)) {
 		return "", errors.New("path_outside_allowed_root")
 	}
 	return resolved, nil
+}
+
+func (policy mcpPolicy) validateReadFile(value string) (string, error) {
+	return validateMCPReadFileWithAccess(value, policy.allowedReadRoots, policy.accessMode == mcpAccessHost)
+}
+
+func mcpEnvironmentAllowed(policy mcpPolicy, allowed map[string]struct{}, name string) bool {
+	if !envName.MatchString(name) {
+		return false
+	}
+	if policy.accessMode == mcpAccessHost {
+		return true
+	}
+	_, ok := allowed[name]
+	return ok
 }
 
 func pathWithinRoots(path string, roots []string) bool {

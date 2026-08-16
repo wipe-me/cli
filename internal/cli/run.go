@@ -493,7 +493,7 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 		fmt.Fprintln(stderr, "  read      consume, decrypt, and output a private message")
 		fmt.Fprintln(stderr, "  exec      consume and inject decrypted content into a child process")
 		fmt.Fprintln(stderr, "  delete    permanently delete a message using its private link")
-		fmt.Fprintln(stderr, "  mcp       run the restricted agent-safe MCP server over stdio")
+		fmt.Fprintln(stderr, "  mcp       run the agent-safe MCP server over stdio")
 		fmt.Fprintln(stderr, "\nOptions:")
 		flags.PrintDefaults()
 	}

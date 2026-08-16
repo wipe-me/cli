@@ -120,7 +120,7 @@ func mcpCredentialCandidates(application wipeme.ApplicationLink, sources []MCPPa
 		}
 		value := ""
 		if source.PassphraseFile != "" {
-			path, err := validateMCPReadFile(source.PassphraseFile, policy.allowedReadRoots)
+			path, err := policy.validateReadFile(source.PassphraseFile)
 			if err != nil {
 				wipeStrings(candidates)
 				return nil, fmt.Errorf("%w: passphrase file is unavailable", err)
@@ -133,7 +133,7 @@ func mcpCredentialCandidates(application wipeme.ApplicationLink, sources []MCPPa
 			value = trimLine(string(data))
 			wipe(data)
 		} else {
-			if _, allowed := policy.allowedPassphraseEnv[source.PassphraseEnv]; !allowed {
+			if !mcpEnvironmentAllowed(policy, policy.allowedPassphraseEnv, source.PassphraseEnv) {
 				wipeStrings(candidates)
 				return nil, errors.New("credential_source_conflict: passphrase environment source is not allowed")
 			}

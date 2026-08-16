@@ -80,7 +80,7 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 		Description: "Consume and decrypt a one-time message into a new private directory without returning message or attachment plaintext.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &openWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input consumeIntoFilesInput) (*mcpsdk.CallToolResult, mcpFileConsumptionOutput, error) {
-		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy.allowedWriteRoots)
+		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy)
 		if err != nil {
 			return nil, mcpFileConsumptionOutput{}, err
 		}
@@ -151,7 +151,7 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 		Description: "Retry file materialization from protected local recovery without another server retrieval.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &closedWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input retryIntoFilesInput) (*mcpsdk.CallToolResult, mcpFileConsumptionOutput, error) {
-		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy.allowedWriteRoots)
+		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy)
 		if err != nil {
 			return nil, mcpFileConsumptionOutput{}, err
 		}
@@ -191,7 +191,7 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 	})
 }
 
-func resolveMCPFileOutputOptions(destination, format string, block *int, writeMessage, writeAttachments *bool, roots []string) (mcpFileOutputOptions, error) {
+func resolveMCPFileOutputOptions(destination, format string, block *int, writeMessage, writeAttachments *bool, policy mcpPolicy) (mcpFileOutputOptions, error) {
 	if format == "" {
 		format = "text"
 	}
@@ -215,23 +215,23 @@ func resolveMCPFileOutputOptions(destination, format string, block *int, writeMe
 	if !message && !attachments {
 		return mcpFileOutputOptions{}, errors.New("invalid_arguments: at least one output type must be enabled")
 	}
-	path, err := validateMCPDestination(destination, roots)
+	path, err := validateMCPDestination(destination, policy)
 	if err != nil {
 		return mcpFileOutputOptions{}, err
 	}
 	return mcpFileOutputOptions{destination: path, messageFormat: format, block: blockIndex, writeMessage: message, writeAttachments: attachments}, nil
 }
 
-func validateMCPDestination(value string, roots []string) (string, error) {
+func validateMCPDestination(value string, policy mcpPolicy) (string, error) {
 	path, err := normalizeAbsolutePath(value)
-	if err != nil || !pathWithinRoots(path, roots) {
+	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(path, policy.allowedWriteRoots)) {
 		return "", errors.New("path_outside_allowed_root: destination directory is not allowed")
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		return "", errors.New("output_refused: destination directory already exists")
 	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil || !pathWithinRoots(parent, roots) {
+	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(parent, policy.allowedWriteRoots)) {
 		return "", errors.New("path_outside_allowed_root: destination parent is not allowed")
 	}
 	return filepath.Join(parent, filepath.Base(path)), nil

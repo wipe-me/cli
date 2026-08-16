@@ -28,6 +28,7 @@ type yamlConfig struct {
 }
 
 type mcpYAMLConfig struct {
+	AccessMode            string                       `yaml:"access_mode"`
 	AllowedReadRoots      []string                     `yaml:"allowed_read_roots"`
 	AllowedWriteRoots     []string                     `yaml:"allowed_write_roots"`
 	AllowedLinkEnv        []string                     `yaml:"allowed_link_env"`
@@ -216,6 +217,9 @@ func mergeYAMLConfig(target *yamlConfig, path string, required bool) error {
 }
 
 func mergeMCPYAMLConfig(target, value *mcpYAMLConfig) {
+	if value.AccessMode != "" {
+		target.AccessMode = strings.TrimSpace(value.AccessMode)
+	}
 	if value.AllowedReadRoots != nil {
 		target.AllowedReadRoots = append([]string(nil), value.AllowedReadRoots...)
 	}

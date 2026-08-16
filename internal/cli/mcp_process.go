@@ -66,19 +66,19 @@ func registerMCPProducerTool(server *mcpsdk.Server, policy mcpPolicy, settings c
 		}
 		stdinPath := ""
 		if input.StdinFile != "" {
-			stdinPath, err = validateMCPReadFile(input.StdinFile, policy.allowedReadRoots)
+			stdinPath, err = policy.validateReadFile(input.StdinFile)
 			if err != nil {
 				return nil, mcpCreationResult{}, fmt.Errorf("%w: producer stdin file is unavailable", err)
 			}
 		}
-		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy.allowedReadRoots)
+		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy)
 		if cleanup != nil {
 			defer cleanup()
 		}
 		if err != nil {
 			return nil, mcpCreationResult{}, err
 		}
-		if _, _, err := preflightMCPCreationOutputs(input.MCPCreationControls, policy.allowedWriteRoots); err != nil {
+		if _, _, err := preflightMCPCreationOutputs(input.MCPCreationControls, policy); err != nil {
 			return nil, mcpCreationResult{}, err
 		}
 

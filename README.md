@@ -61,7 +61,7 @@ Stable agent-facing exit codes are `2` for invalid usage, `3` for an invalid lin
 `8` for refused output, and `9` when a child cannot be launched. A started child’s
 own exit status is propagated directly; other failures use `1`.
 
-### Restricted MCP server
+### MCP server
 
 `wipeme mcp` runs a local stdio MCP server for Codex, Claude, and other compatible
 agent hosts. It never exposes a direct-read tool and never returns decrypted text,
@@ -72,6 +72,15 @@ Install it in Codex with:
 codex mcp add wipeme -- wipeme mcp
 ```
 
+Local stdio MCP defaults to `host` access: filesystem paths and environment names
+are governed by the permissions of the desktop host, container, OS account, and
+its approval flow. Select `restricted` when you want Wipe.me to enforce additional
+path and environment allowlists:
+
+```sh
+wipeme mcp --access restricted
+```
+
 The MCP server exposes these tools:
 
 | Tool | Behavior |
@@ -79,8 +88,8 @@ The MCP server exposes these tools:
 | `inspect_private_link` | Validate a link locally without network access or echoing it |
 | `generate_secret` | Generate and encrypt a password, returning only its private link |
 | `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
-| `create_from_files` | Encrypt a message file and attachments from allowed read roots |
-| `create_from_env` | Encrypt allowlisted server environment values |
+| `create_from_files` | Encrypt a message file and attachments permitted by the active access policy |
+| `create_from_env` | Encrypt server environment values permitted by the active access policy |
 | `create_from_process_output` | Encrypt stdout from an approved producer profile |
 | `consume_into_files` | Consume into a new mode-0700 directory without returning plaintext |
 | `retry_into_files` | Retry protected file output without another retrieval |
@@ -91,12 +100,16 @@ The MCP server exposes these tools:
 
 MCP stdin and stdout are reserved exclusively for newline-delimited JSON-RPC while
 the server is running; this does not change stdin/stdout behavior for ordinary CLI
-commands. Filesystem tools are disabled until explicit read/write roots are
-configured. Process tools can only use administrator-defined profiles and execute
-their absolute executable directly without a shell.
+commands. In `restricted` mode, filesystem tools are disabled until explicit
+read/write roots are configured. In the default `host` mode, they may use absolute
+paths allowed by the OS and MCP host. Both modes retain regular-file checks,
+no-overwrite output, private permissions, and traversal-safe handling. Process
+tools always require administrator-defined profiles and execute their absolute
+executable directly without a shell.
 
 ```yaml
 mcp:
+  access_mode: restricted
   allowed_read_roots: [/workspace, /run/secrets]
   allowed_write_roots: [/workspace/output]
   allowed_link_env: [WIPEME_PRIVATE_LINK]
@@ -119,6 +132,16 @@ mcp:
       inherit_env: [HOME, PATH]
       max_stdout_bytes: 65536
 ```
+
+For normal trusted desktop use, the equivalent configuration is simply:
+
+```yaml
+mcp:
+  access_mode: host
+```
+
+`host` is the built-in default, so that mapping may be omitted. A command-line
+`--access host|restricted` value overrides `mcp.access_mode` for that server run.
 
 Configuration containing MCP policy must be owned by the current user or root and
 must not be writable by group or others. Recovery records are local, mode-0600

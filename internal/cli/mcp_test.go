@@ -41,6 +41,62 @@ func TestMCPHelpAndVersionDoNotStartServer(t *testing.T) {
 			t.Fatalf("args=%v stdout=%q stderr=%q", test.args, stdout.String(), stderr.String())
 		}
 	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"mcp", "--help"}, bytes.NewReader(nil), &stdout, &stderr, "test"); code != 0 || !strings.Contains(stderr.String(), "-access string") || !strings.Contains(stderr.String(), "default host") {
+		t.Fatalf("MCP help does not document access policy: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestMCPAccessPolicyDefaultsToHostAndSupportsRestrictedOverride(t *testing.T) {
+	host, err := resolveMCPPolicy(nil, "")
+	if err != nil || host.accessMode != mcpAccessHost {
+		t.Fatalf("default policy=%#v err=%v", host, err)
+	}
+
+	restricted, err := resolveMCPPolicy(&mcpYAMLConfig{AccessMode: mcpAccessRestricted}, "")
+	if err != nil || restricted.accessMode != mcpAccessRestricted {
+		t.Fatalf("restricted policy=%#v err=%v", restricted, err)
+	}
+
+	overridden, err := resolveMCPPolicy(&mcpYAMLConfig{AccessMode: mcpAccessRestricted}, mcpAccessHost)
+	if err != nil || overridden.accessMode != mcpAccessHost {
+		t.Fatalf("overridden policy=%#v err=%v", overridden, err)
+	}
+
+	if _, err := resolveMCPPolicy(nil, "invalid"); err == nil || !strings.Contains(err.Error(), "host or restricted") {
+		t.Fatalf("expected invalid access policy error, got %v", err)
+	}
+}
+
+func TestMCPHostAccessUsesOSPermissionsWhileRestrictedUsesAllowlists(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "link")
+	if err := os.WriteFile(path, []byte(testAutomaticLink+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	host := mcpPolicy{accessMode: mcpAccessHost}
+	result, err := inspectPrivateLink(host, inspectPrivateLinkInput{LinkFile: path})
+	if err != nil || !result.Valid {
+		t.Fatalf("host result=%#v err=%v", result, err)
+	}
+	if !mcpEnvironmentAllowed(host, nil, "MCP_TEST_SECRET") {
+		t.Fatal("host mode rejected a valid inherited environment name")
+	}
+	if _, err := validateMCPDestination(filepath.Join(root, "output"), host); err != nil {
+		t.Fatalf("host mode rejected OS-writable destination: %v", err)
+	}
+
+	restricted := mcpPolicy{accessMode: mcpAccessRestricted}
+	if _, err := inspectPrivateLink(restricted, inspectPrivateLinkInput{LinkFile: path}); err == nil || !strings.Contains(err.Error(), "path_outside_allowed_root") {
+		t.Fatalf("restricted mode unexpectedly read outside an allowlist: %v", err)
+	}
+	if mcpEnvironmentAllowed(restricted, nil, "MCP_TEST_SECRET") {
+		t.Fatal("restricted mode unexpectedly allowed an environment source")
+	}
+	if _, err := validateMCPDestination(filepath.Join(root, "output"), restricted); err == nil || !strings.Contains(err.Error(), "path_outside_allowed_root") {
+		t.Fatalf("restricted mode unexpectedly allowed an output destination: %v", err)
+	}
 }
 
 func TestMCPStdioContainsOnlyJSONRPCFraming(t *testing.T) {
@@ -282,7 +338,7 @@ func TestMCPGenerateSecretReturnsLinkAndDecodableQRWithoutPlaintext(t *testing.T
 	}
 }
 
-func TestMCPCreateFromEnvDoesNotReturnSourceValue(t *testing.T) {
+func TestMCPHostAccessCreatesFromInheritedEnvWithoutReturningSourceValue(t *testing.T) {
 	const canary = "MCP_ENV_CANARY_secret-value"
 	t.Setenv("MCP_TEST_API_TOKEN", canary)
 	var uploaded []byte
@@ -293,7 +349,7 @@ func TestMCPCreateFromEnvDoesNotReturnSourceValue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	policy := mcpPolicy{allowedSourceEnv: map[string]struct{}{"MCP_TEST_API_TOKEN": {}}, maxEnvironmentSources: 16}
+	policy := mcpPolicy{accessMode: mcpAccessHost, maxEnvironmentSources: 16}
 	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
 	defer cleanup()
@@ -892,6 +948,12 @@ func encryptedMCPTestMessage(t *testing.T, message string, attachments []wipeme.
 
 func TestMCPConfigRejectsUnknownAndInsecurePolicyFiles(t *testing.T) {
 	clearConfigEnvironment(t)
+	known := writeTestConfig(t, "mcp:\n  access_mode: restricted\n")
+	loaded, err := loadBaseConfig([]string{"--config", known})
+	if err != nil || loaded.MCP == nil || loaded.MCP.AccessMode != mcpAccessRestricted {
+		t.Fatalf("load access mode: config=%#v err=%v", loaded.MCP, err)
+	}
+
 	unknown := writeTestConfig(t, "mcp:\n  allowed_reed_roots: []\n")
 	if _, err := loadBaseConfig([]string{"--config", unknown}); err == nil {
 		t.Fatal("expected unknown MCP configuration field to fail")
@@ -903,6 +965,11 @@ func TestMCPConfigRejectsUnknownAndInsecurePolicyFiles(t *testing.T) {
 	}
 	if err := validateMCPConfigFiles([]string{"--config", insecure}); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
 		t.Fatalf("expected insecure configuration error, got %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"mcp", "--config", known, "--access", "invalid"}, bytes.NewReader(nil), &stdout, &stderr, "test"); code == 0 || !strings.Contains(stderr.String(), "host or restricted") {
+		t.Fatalf("expected invalid access flag error: code=%d stderr=%q", code, stderr.String())
 	}
 }
 

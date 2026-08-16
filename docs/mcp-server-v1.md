@@ -6,7 +6,7 @@ Command: `wipeme mcp`
 
 ## 1. Purpose
 
-`wipeme mcp` exposes a deliberately restricted, agent-oriented subset of the
+`wipeme mcp` exposes a deliberately agent-oriented subset of the
 Wipe.me CLI through Model Context Protocol tools. It reuses the existing Go SDK,
 encrypted envelope v1, compact link formats, metadata cleanup, configuration
 resolution, and API client. It must not introduce another cryptographic or message
@@ -69,16 +69,20 @@ The command help is intentionally small:
 ```text
 Usage: wipeme mcp [options]
 
-Run the restricted Wipe.me MCP server over stdio.
+Run the agent-safe Wipe.me MCP server over stdio.
 
 Options:
+  -access string
+        access policy: host or restricted (default host)
   -config string
         configuration file
   -version
         print the version and exit before starting MCP
 ```
 
-The MCP server is the enforced security boundary. An optional skill or plugin may
+The MCP server remains the plaintext-isolation boundary. Filesystem and environment
+authorization defaults to the local host's OS permissions and approval model;
+`restricted` mode adds server-side allowlists. An optional skill or plugin may
 describe workflows and declare the MCP dependency, but instructions must not be
 relied upon to prevent unsafe behavior.
 
@@ -92,7 +96,8 @@ These requirements are mandatory and are not agent-configurable:
    attachment contents, and process output never appear in logs or errors.
 4. Creation endpoint URLs are resolved from trusted CLI configuration, never from
    tool arguments.
-5. Filesystem access is restricted to configured read and write roots.
+5. Host access accepts absolute paths permitted by the OS. Restricted access also
+   requires paths to remain inside configured read and write roots.
 6. Secret output files use mode `0600`; private directories use mode `0700`.
 7. Existing outputs are never overwritten.
 8. Process execution uses configured profiles and `exec` directly, never a shell.
@@ -100,8 +105,8 @@ These requirements are mandatory and are not agent-configurable:
 10. Successful file materialization always wipes recovery state.
 11. Failed deletion of a generated pending message retains recovery state so that
     deletion can be retried.
-12. Manual passphrases may come only from an approved file or allowlisted
-    environment variable.
+12. Manual passphrases may come only from a protected file or environment source
+    permitted by the active access policy.
 13. Automatic-key fragments never leave the client in an HTTP request.
 14. Supported attachment metadata is always stripped using the existing CLI
     implementation. There is no MCP option to disable privacy cleanup.
@@ -125,8 +130,10 @@ type LinkSource =
 ```
 
 `link_file` is recommended for agents. A file has one trailing `LF` or `CRLF`
-removed; other whitespace is preserved. `link_env` must be allowlisted. Empty,
-ambiguous, or malformed sources fail before network access.
+removed; other whitespace is preserved. In host mode, `link_env` may name any
+valid environment variable inherited by the MCP process. Restricted mode requires
+it in `allowed_link_env`. Empty, ambiguous, or malformed sources fail before
+network access.
 
 ### 4.2 Passphrase source
 
@@ -140,7 +147,9 @@ type PassphraseSource =
 
 There is no `passphrase` string, passphrase stdin, or terminal prompt in MCP mode.
 Automatic links use their fragment locally. Passphrase files have one trailing
-line ending removed without trimming ordinary spaces.
+line ending removed without trimming ordinary spaces. Host mode relies on OS file
+access and inherited environment; restricted mode additionally enforces the
+configured read roots and `allowed_passphrase_env`.
 
 Creation accepts at most one source because that value defines the manual
 capability. Consumption and deletion accept an ordered `passphrase_sources` array,
@@ -411,13 +420,15 @@ At least one input file is required. `message_file` content never enters MCP
 arguments or results. `editorjs_json` must parse as the existing document model;
 attachments are appended without rewriting unrelated blocks.
 
-Paths must be absolute, inside allowed read roots, regular files and stable while
-read. Reject devices, sockets, FIFOs, directory inputs, root escapes and unsafe
-symlinks. Preserve attachment ordering. Result: `CreationResult`.
+Paths must be absolute, regular files and stable while read. Restricted mode also
+requires them inside allowed read roots. Reject devices, sockets, FIFOs, directory
+inputs, root escapes and unsafe symlinks. Preserve attachment ordering. Result:
+`CreationResult`.
 
 ## 11. Tool: `create_from_env`
 
-Creates a message from one or more allowlisted server environment variables.
+Creates a message from one or more server environment variables permitted by the
+active access policy.
 
 ```ts
 interface CreateFromEnvInput extends CreationControls {
@@ -425,7 +436,8 @@ interface CreateFromEnvInput extends CreationControls {
 }
 ```
 
-- Variable source names must be configured in `mcp.allowed_source_env`.
+- Host mode accepts valid names inherited by the MCP process. Restricted mode
+  requires names in `mcp.allowed_source_env`.
 - Each value becomes an ordinary text block in request order.
 - v1 deliberately has no label option. The current document model has no labelled
   secret block, and inserting a text label would break first-text-block selection.
@@ -744,11 +756,36 @@ Existing precedence remains flags, environment, user YAML, system YAML and built
 defaults. MCP has no per-call endpoint override. Extend YAML with a strict `mcp`
 mapping and reject unknown fields:
 
+`host` is the default for local stdio clients. It relies on the OS account,
+container or sandbox, desktop-host permissions, and MCP approval flow for
+filesystem and inherited-environment authorization:
+
 ```yaml
 server_url: https://wipe.me
 expires: 24h
 
 mcp:
+  access_mode: host
+  recovery_directory: /run/user/1000/wipeme-mcp-recovery
+  recovery_ttl: 15m
+  recovery_max_attempts: 5
+  max_environment_sources: 16
+  process_profiles: {}
+```
+
+Host mode still requires absolute paths, regular input files, existing output
+parents, no-overwrite destinations, safe attachment names, private permissions,
+and protected recovery. It does not turn process tools into arbitrary command
+execution: producer and consumer process profiles remain mandatory.
+
+`restricted` adds Wipe.me-managed filesystem and environment allowlists:
+
+```yaml
+server_url: https://wipe.me
+expires: 24h
+
+mcp:
+  access_mode: restricted
   allowed_read_roots:
     - /workspace
     - /run/secrets
@@ -767,6 +804,11 @@ mcp:
   max_environment_sources: 16
   process_profiles: {}
 ```
+
+The command-line `--access host|restricted` value overrides
+`mcp.access_mode`. In restricted mode, empty roots or environment allowlists deny
+the corresponding source or destination. In host mode, these allowlist fields are
+not consulted.
 
 Environment overrides for MCP policy should be minimal and explicitly documented.
 Do not accept serialized process profiles or allowed roots from a single environment
@@ -827,9 +869,13 @@ Implementation is complete only when all of the following pass:
 15. Tests cover recovery TTL, attempt exhaustion, startup cleanup, corrupt records,
     permissions and concurrent handle use.
 16. Race tests ensure one recovery handle cannot execute concurrently.
-17. Run `gofmt`, `go test ./...`, `go test -race ./...` and `go vet ./...`.
-18. Run MCP protocol conformance/inspector tests against the built binary.
-19. Run end-to-end Docker tests on the development network for create, consume,
+17. Tests prove host mode uses OS-visible absolute paths and inherited environment
+    without Wipe.me allowlists, while restricted mode denies access outside its
+    configured roots and environment allowlists.
+18. Tests prove `--access` overrides YAML and invalid access modes fail at startup.
+19. Run `gofmt`, `go test ./...`, `go test -race ./...` and `go vet ./...`.
+20. Run MCP protocol conformance/inspector tests against the built binary.
+21. Run end-to-end Docker tests on the development network for create, consume,
     retry, delete, generated execution and QR flows.
 20. Inspect Docker and MCP logs for known canary secrets.
 21. Build GoReleaser snapshots and verify static macOS/Linux AMD64/ARM64 builds plus

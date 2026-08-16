@@ -167,7 +167,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 		if err := validateMCPEnvironmentName(profile, input.EnvironmentName); err != nil {
 			return nil, mcpProcessExecutionOutput{}, err
 		}
-		linkPath, receiptPath, err := preflightMCPCreationOutputs(input.MCPCreationControls, policy.allowedWriteRoots)
+		linkPath, receiptPath, err := preflightMCPCreationOutputs(input.MCPCreationControls, policy)
 		if err != nil {
 			return nil, mcpProcessExecutionOutput{}, err
 		}

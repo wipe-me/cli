@@ -105,7 +105,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 		if err != nil {
 			return nil, mcpCreationResult{}, errors.New("internal_error: prepare encrypted message")
 		}
-		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy.allowedReadRoots)
+		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy)
 		if cleanup != nil {
 			defer cleanup()
 		}
@@ -119,7 +119,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "create_from_files",
 		Title:       "Create from protected files",
-		Description: "Create a one-time encrypted message from an optional message file and one or more attachments inside administrator-approved read roots. File contents are never returned.",
+		Description: "Create a one-time encrypted message from an optional message file and one or more attachments permitted by the active access policy. File contents are never returned.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input createFromFilesInput) (*mcpsdk.CallToolResult, mcpCreationResult, error) {
 		if input.MessageFile == "" && len(input.AttachmentPaths) == 0 {
@@ -134,7 +134,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 		}
 		message := ""
 		if input.MessageFile != "" {
-			path, err := validateMCPReadFile(input.MessageFile, policy.allowedReadRoots)
+			path, err := policy.validateReadFile(input.MessageFile)
 			if err != nil {
 				return nil, mcpCreationResult{}, fmt.Errorf("%w: message file is unavailable", err)
 			}
@@ -155,7 +155,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 				}
 			}
 		}
-		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy.allowedReadRoots)
+		files, cleanup, err := prepareMCPAttachments(input.AttachmentPaths, policy)
 		if cleanup != nil {
 			defer cleanup()
 		}
@@ -169,7 +169,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "create_from_env",
 		Title:       "Create from protected environment values",
-		Description: "Encrypt one or more allowlisted server environment values into a one-time message without returning their plaintext.",
+		Description: "Encrypt one or more server environment values permitted by the active access policy without returning their plaintext.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input createFromEnvInput) (*mcpsdk.CallToolResult, mcpCreationResult, error) {
 		if len(input.Variables) == 0 || len(input.Variables) > policy.maxEnvironmentSources {
@@ -179,7 +179,7 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 		defer wipeStrings(values)
 		seen := map[string]struct{}{}
 		for _, source := range input.Variables {
-			if _, allowed := policy.allowedSourceEnv[source.Source]; !allowed {
+			if !mcpEnvironmentAllowed(policy, policy.allowedSourceEnv, source.Source) {
 				return nil, mcpCreationResult{}, errors.New("invalid_arguments: environment source is not allowed")
 			}
 			if _, duplicate := seen[source.Source]; duplicate {
@@ -214,7 +214,7 @@ func createMCPMessage(ctx context.Context, policy mcpPolicy, settings config, re
 	if expires <= 0 || expires > wipeme.MaxFreeExpiry {
 		return result, nil, errors.New("invalid_arguments: expiry is outside service limits")
 	}
-	linkPath, receiptPath, err := preflightMCPCreationOutputs(request.controls, policy.allowedWriteRoots)
+	linkPath, receiptPath, err := preflightMCPCreationOutputs(request.controls, policy)
 	if err != nil {
 		return result, nil, err
 	}
@@ -350,7 +350,7 @@ func resolveMCPCreationPassphrase(source *MCPPassphraseSource, policy mcpPolicy)
 		return "", false, errors.New("credential_source_conflict: provide exactly one passphrase source")
 	}
 	if source.PassphraseFile != "" {
-		path, err := validateMCPReadFile(source.PassphraseFile, policy.allowedReadRoots)
+		path, err := policy.validateReadFile(source.PassphraseFile)
 		if err != nil {
 			return "", false, fmt.Errorf("%w: passphrase file is unavailable", err)
 		}
@@ -365,7 +365,7 @@ func resolveMCPCreationPassphrase(source *MCPPassphraseSource, policy mcpPolicy)
 		}
 		return value, true, nil
 	}
-	if _, allowed := policy.allowedPassphraseEnv[source.PassphraseEnv]; !allowed {
+	if !mcpEnvironmentAllowed(policy, policy.allowedPassphraseEnv, source.PassphraseEnv) {
 		return "", false, errors.New("credential_source_conflict: passphrase environment source is not allowed")
 	}
 	value, ok := os.LookupEnv(source.PassphraseEnv)
@@ -375,10 +375,10 @@ func resolveMCPCreationPassphrase(source *MCPPassphraseSource, policy mcpPolicy)
 	return value, true, nil
 }
 
-func prepareMCPAttachments(paths []string, roots []string) ([]media.File, func(), error) {
+func prepareMCPAttachments(paths []string, policy mcpPolicy) ([]media.File, func(), error) {
 	files := make([]media.File, 0, len(paths))
 	for _, value := range paths {
-		path, err := validateMCPReadFile(value, roots)
+		path, err := policy.validateReadFile(value)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: attachment is unavailable", err)
 		}
@@ -395,12 +395,12 @@ func prepareMCPAttachments(paths []string, roots []string) ([]media.File, func()
 	return cleaned, cleanup, nil
 }
 
-func preflightMCPCreationOutputs(controls MCPCreationControls, roots []string) (string, string, error) {
-	link, err := validateMCPOutputFile(controls.LinkFile, roots)
+func preflightMCPCreationOutputs(controls MCPCreationControls, policy mcpPolicy) (string, string, error) {
+	link, err := validateMCPOutputFile(controls.LinkFile, policy)
 	if err != nil {
 		return "", "", err
 	}
-	receipt, err := validateMCPOutputFile(controls.ReceiptFile, roots)
+	receipt, err := validateMCPOutputFile(controls.ReceiptFile, policy)
 	if err != nil {
 		return "", "", err
 	}
@@ -410,19 +410,19 @@ func preflightMCPCreationOutputs(controls MCPCreationControls, roots []string) (
 	return link, receipt, nil
 }
 
-func validateMCPOutputFile(value string, roots []string) (string, error) {
+func validateMCPOutputFile(value string, policy mcpPolicy) (string, error) {
 	if value == "" {
 		return "", nil
 	}
 	path, err := normalizeAbsolutePath(value)
-	if err != nil || !pathWithinRoots(path, roots) {
+	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(path, policy.allowedWriteRoots)) {
 		return "", errors.New("path_outside_allowed_root: output path is not allowed")
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		return "", errors.New("output_refused: output already exists")
 	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil || !pathWithinRoots(parent, roots) {
+	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(parent, policy.allowedWriteRoots)) {
 		return "", errors.New("path_outside_allowed_root: output parent is not allowed")
 	}
 	info, err := os.Stat(parent)

@@ -606,8 +606,8 @@ func TestMCPDeleteMessageUsesCapabilityWithoutEchoingIt(t *testing.T) {
 func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *testing.T) {
 	const canary = "MCP_CONSUME_CANARY_private-message"
 	link, envelope, contentHash := encryptedMCPTestMessage(t, canary, []wipeme.AttachmentInput{
-		{Reader: strings.NewReader("first attachment"), Name: "same.txt", Type: "text/plain", Kind: "text", Size: int64(len("first attachment"))},
-		{Reader: strings.NewReader("second attachment"), Name: "same.txt", Type: "text/plain", Kind: "text", Size: int64(len("second attachment"))},
+		{Reader: strings.NewReader("first attachment"), Name: "private-note.md", Type: "text/plain", Kind: "text", Size: int64(len("first attachment"))},
+		{Reader: strings.NewReader("second attachment"), Name: "private-note.md", Type: "text/plain", Kind: "text", Size: int64(len("second attachment"))},
 	})
 	gets := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -628,6 +628,7 @@ func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *tes
 		Arguments: map[string]any{
 			"private_link":          link,
 			"destination_directory": destination,
+			"message_filename":      "private-note.md",
 		},
 	})
 	if err != nil || result.IsError || gets != 1 {
@@ -637,19 +638,24 @@ func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *tes
 	if bytes.Contains(wire, []byte(canary)) || bytes.Contains(wire, []byte("first attachment")) {
 		t.Fatalf("plaintext leaked into consume result: %s", wire)
 	}
-	message, err := os.ReadFile(filepath.Join(destination, "message.txt"))
+	var output mcpFileConsumptionOutput
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &output); err != nil || output.MessageFilename != "private-note.md" {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+	message, err := os.ReadFile(filepath.Join(destination, "private-note.md"))
 	if err != nil || string(message) != canary {
 		t.Fatalf("message=%q err=%v", message, err)
 	}
-	first, err := os.ReadFile(filepath.Join(destination, "same.txt"))
+	first, err := os.ReadFile(filepath.Join(destination, "001-private-note.md"))
 	if err != nil || string(first) != "first attachment" {
 		t.Fatalf("first attachment=%q err=%v", first, err)
 	}
-	second, err := os.ReadFile(filepath.Join(destination, "002-same.txt"))
+	second, err := os.ReadFile(filepath.Join(destination, "002-private-note.md"))
 	if err != nil || string(second) != "second attachment" {
 		t.Fatalf("second attachment=%q err=%v", second, err)
 	}
-	for _, path := range []string{destination, filepath.Join(destination, "message.txt"), filepath.Join(destination, "same.txt"), filepath.Join(destination, "002-same.txt")} {
+	for _, path := range []string{destination, filepath.Join(destination, "private-note.md"), filepath.Join(destination, "001-private-note.md"), filepath.Join(destination, "002-private-note.md")} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
@@ -661,6 +667,32 @@ func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *tes
 		if info.Mode().Perm() != want {
 			t.Fatalf("%s permissions=%o want=%o", path, info.Mode().Perm(), want)
 		}
+	}
+}
+
+func TestMCPMessageFilenameValidationRejectsPathsAndControls(t *testing.T) {
+	for _, value := range []string{"../secret", "sub/secret", `sub\secret`, ".", "..", "line\nbreak"} {
+		if _, err := resolveMCPMessageFilename(value, "text"); err == nil || !strings.Contains(err.Error(), "safe basename") {
+			t.Fatalf("unsafe message filename %q accepted: %v", value, err)
+		}
+	}
+	for _, test := range []struct {
+		value  string
+		format string
+		want   string
+	}{
+		{"", "text", "message.txt"},
+		{"", "editorjs_json", "message.json"},
+		{"секрет.txt", "text", "секрет.txt"},
+	} {
+		got, err := resolveMCPMessageFilename(test.value, test.format)
+		if err != nil || got != test.want {
+			t.Fatalf("value=%q format=%q got=%q want=%q err=%v", test.value, test.format, got, test.want, err)
+		}
+	}
+	writeMessage := false
+	if _, err := resolveMCPFileOutputOptions("/unused", "text", "secret.txt", nil, &writeMessage, nil, mcpPolicy{}); err == nil || !strings.Contains(err.Error(), "requires write_message") {
+		t.Fatalf("message_filename without message output accepted: %v", err)
 	}
 }
 
@@ -707,12 +739,13 @@ func TestMCPRetryIntoFilesDoesNotRetrieveAgain(t *testing.T) {
 		Arguments: map[string]any{
 			"recovery_handle":       pending.RecoveryHandle,
 			"destination_directory": destination,
+			"message_filename":      "recovered-secret.txt",
 		},
 	})
 	if err != nil || retried.IsError || gets != 1 {
 		t.Fatalf("err=%v gets=%d result=%#v", err, gets, retried)
 	}
-	message, err := os.ReadFile(filepath.Join(destination, "message.txt"))
+	message, err := os.ReadFile(filepath.Join(destination, "recovered-secret.txt"))
 	if err != nil || string(message) != canary {
 		t.Fatalf("message=%q err=%v", message, err)
 	}
@@ -732,9 +765,9 @@ func TestMCPEnvironmentFileEncodersUseExplicitNativeFormats(t *testing.T) {
 		format string
 		want   string
 	}{
-		{mcpEnvFormatDotenv, "PRIVATE_KEY=\"line 1\\nline '\\$2' \\\\\\\"\"\n"},
-		{mcpEnvFormatShell, "export PRIVATE_KEY='line 1\nline '\"'\"'$2'\"'\"' \\\"'\n"},
-		{mcpEnvFormatSystemd, "PRIVATE_KEY=\"line 1\nline '\\$2' \\\\\\\"\"\n"},
+		{mcpEnvFormatDotenv, "# wipeme-format: dotenv\nPRIVATE_KEY=\"line 1\\nline '\\$2' \\\\\\\"\"\n"},
+		{mcpEnvFormatShell, "# wipeme-format: shell\nexport PRIVATE_KEY='line 1\nline '\"'\"'$2'\"'\"' \\\"'\n"},
+		{mcpEnvFormatSystemd, "# wipeme-format: systemd\nPRIVATE_KEY=\"line 1\nline '\\$2' \\\\\\\"\"\n"},
 	}
 	for _, test := range tests {
 		encoded, err := encodeMCPEnvFile(test.format, mappings, values)
@@ -747,8 +780,50 @@ func TestMCPEnvironmentFileEncodersUseExplicitNativeFormats(t *testing.T) {
 	}
 	values["PRIVATE_KEY"] = "single-line=$literal#value"
 	encoded, err := encodeMCPEnvFile(mcpEnvFormatDocker, mappings, values)
-	if err != nil || string(encoded) != "PRIVATE_KEY=single-line=$literal#value\n" {
+	if err != nil || string(encoded) != "# wipeme-format: docker\nPRIVATE_KEY=single-line=$literal#value\n" {
 		t.Fatalf("Docker encoded=%q err=%v", encoded, err)
+	}
+}
+
+func TestMCPEnvironmentFileFormatAutodetection(t *testing.T) {
+	root := t.TempDir()
+	policy := mcpPolicy{allowedWriteRoots: []string{root}}
+	selectors := []mcpEnvironmentSelector{{Name: "PRIVATE_KEY"}}
+	for _, format := range []string{mcpEnvFormatDotenv, mcpEnvFormatDocker, mcpEnvFormatShell, mcpEnvFormatSystemd} {
+		path := filepath.Join(root, "existing-"+format+".env")
+		data := []byte(mcpEnvFormatMarker + format + "\nPRIVATE_KEY=existing\n")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		options, err := resolveMCPEnvFileOptions(path, selectors, "", true, policy, false)
+		if err != nil || options.format != format {
+			t.Fatalf("format=%q detected=%q err=%v", format, options.format, err)
+		}
+	}
+	for _, test := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"legacy.sh", "PRIVATE_KEY=existing\n", mcpEnvFormatShell},
+		{"legacy.docker.env", "PRIVATE_KEY=existing\n", mcpEnvFormatDocker},
+		{"legacy.systemd.env", "PRIVATE_KEY=existing\n", mcpEnvFormatSystemd},
+		{"legacy.env", "PRIVATE_KEY=existing\n", mcpEnvFormatDotenv},
+		{"content-over-name.systemd", "PRIVATE_KEY=existing\nexport API_TOKEN='token'\n", mcpEnvFormatShell},
+		{"content-over-name.sh", "PRIVATE_KEY=existing\n; managed by systemd\n", mcpEnvFormatSystemd},
+		{"shebang.env", "#!/usr/bin/env bash\nPRIVATE_KEY=existing\n", mcpEnvFormatShell},
+		{"dotenv-escapes", "PRIVATE_KEY=\"line\\nvalue\"\n", mcpEnvFormatDotenv},
+		{"systemd-escapes", "PRIVATE_KEY=\"literal\\`tick\"\n", mcpEnvFormatSystemd},
+		{"neutral", "PRIVATE_KEY=existing\n", mcpEnvFormatDotenv},
+	} {
+		path := filepath.Join(root, test.name)
+		if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		options, err := resolveMCPEnvFileOptions(path, selectors, "", true, policy, false)
+		if err != nil || options.format != test.want {
+			t.Fatalf("name=%q detected=%q want=%q err=%v", test.name, options.format, test.want, err)
+		}
 	}
 }
 
@@ -851,7 +926,7 @@ func TestMCPConsumeIntoEnvFileRetriesWithoutAnotherRetrieval(t *testing.T) {
 		t.Fatalf("err=%v gets=%d result=%#v", err, gets, retried)
 	}
 	data, err := os.ReadFile(destination)
-	want := "PRIVATE_KEY=\"" + firstCanary + "\"\nAPI_TOKEN=\"" + secondCanary + "\"\n"
+	want := "# wipeme-format: dotenv\nPRIVATE_KEY=\"" + firstCanary + "\"\nAPI_TOKEN=\"" + secondCanary + "\"\n"
 	if err != nil || string(data) != want {
 		t.Fatalf("environment file=%q want=%q err=%v", data, want, err)
 	}
@@ -922,10 +997,14 @@ func TestMCPGenerateSecretIntoEnvFileRetriesSameSecretAndThenReleasesLink(t *tes
 		t.Fatalf("completed=%#v err=%v", completed, err)
 	}
 	data, err := os.ReadFile(destination)
-	if err != nil || !bytes.HasPrefix(data, []byte("DATABASE_PASSWORD=")) {
+	if err != nil || !bytes.HasPrefix(data, []byte("# wipeme-format: docker\nDATABASE_PASSWORD=")) {
 		t.Fatalf("generated environment file=%q err=%v", data, err)
 	}
-	generated := strings.TrimSuffix(strings.TrimPrefix(string(data), "DATABASE_PASSWORD="), "\n")
+	lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("generated environment file lines=%q", lines)
+	}
+	generated := strings.TrimPrefix(string(lines[1]), "DATABASE_PASSWORD=")
 	if len(generated) != 24 {
 		t.Fatalf("generated secret length=%d", len(generated))
 	}

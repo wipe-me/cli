@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wipe-me/sdk/go/wipeme"
@@ -20,6 +21,7 @@ type consumeIntoFilesInput struct {
 	PassphraseSources    []MCPPassphraseSource `json:"passphrase_sources,omitempty"`
 	DestinationDirectory string                `json:"destination_directory"`
 	MessageFormat        string                `json:"message_format,omitempty"`
+	MessageFilename      string                `json:"message_filename,omitempty"`
 	Block                *int                  `json:"block,omitempty"`
 	WriteMessage         *bool                 `json:"write_message,omitempty"`
 	WriteAttachments     *bool                 `json:"write_attachments,omitempty"`
@@ -29,6 +31,7 @@ type retryIntoFilesInput struct {
 	RecoveryHandle       string `json:"recovery_handle"`
 	DestinationDirectory string `json:"destination_directory"`
 	MessageFormat        string `json:"message_format,omitempty"`
+	MessageFilename      string `json:"message_filename,omitempty"`
 	Block                *int   `json:"block,omitempty"`
 	WriteMessage         *bool  `json:"write_message,omitempty"`
 	WriteAttachments     *bool  `json:"write_attachments,omitempty"`
@@ -54,6 +57,7 @@ type pendingFileConsumptionResult struct {
 type mcpFileOutputOptions struct {
 	destination      string
 	messageFormat    string
+	messageFilename  string
 	block            int
 	writeMessage     bool
 	writeAttachments bool
@@ -64,6 +68,7 @@ type mcpFileConsumptionOutput struct {
 	MessageWritten       bool   `json:"message_written,omitempty"`
 	AttachmentCount      int    `json:"attachment_count,omitempty"`
 	DestinationDirectory string `json:"destination_directory,omitempty"`
+	MessageFilename      string `json:"message_filename,omitempty"`
 	RecoveryDeleted      bool   `json:"recovery_deleted,omitempty"`
 	Consumed             bool   `json:"consumed,omitempty"`
 	Retryable            bool   `json:"retryable,omitempty"`
@@ -77,10 +82,10 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "consume_into_files",
 		Title:       "Consume into protected files",
-		Description: "Consume and decrypt a one-time message into a new private directory without returning message or attachment plaintext.",
+		Description: "Consume and decrypt a one-time message into a new private directory, optionally naming the message file, without returning message or attachment plaintext.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &openWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input consumeIntoFilesInput) (*mcpsdk.CallToolResult, mcpFileConsumptionOutput, error) {
-		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy)
+		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.MessageFilename, input.Block, input.WriteMessage, input.WriteAttachments, policy)
 		if err != nil {
 			return nil, mcpFileConsumptionOutput{}, err
 		}
@@ -141,17 +146,17 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 		if err := store.discard(handle); err != nil {
 			return nil, mcpFileConsumptionOutput{}, errors.New("recovery_corrupt: completed recovery could not be removed")
 		}
-		return nil, successfulFileOutput(options.destination, written, attachments), nil
+		return nil, successfulFileOutput(options, written, attachments), nil
 	})
 
 	closedWorld := false
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "retry_into_files",
 		Title:       "Retry protected file output",
-		Description: "Retry file materialization from protected local recovery without another server retrieval.",
+		Description: "Retry file materialization with an optional custom message filename from protected local recovery without another server retrieval.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &closedWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input retryIntoFilesInput) (*mcpsdk.CallToolResult, mcpFileConsumptionOutput, error) {
-		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.Block, input.WriteMessage, input.WriteAttachments, policy)
+		options, err := resolveMCPFileOutputOptions(input.DestinationDirectory, input.MessageFormat, input.MessageFilename, input.Block, input.WriteMessage, input.WriteAttachments, policy)
 		if err != nil {
 			return nil, mcpFileConsumptionOutput{}, err
 		}
@@ -187,11 +192,11 @@ func registerMCPFileConsumptionTools(server *mcpsdk.Server, policy mcpPolicy, se
 		if err := lease.delete(); err != nil {
 			return nil, mcpFileConsumptionOutput{}, errors.New("recovery_corrupt: completed recovery could not be removed")
 		}
-		return nil, successfulFileOutput(options.destination, written, attachments), nil
+		return nil, successfulFileOutput(options, written, attachments), nil
 	})
 }
 
-func resolveMCPFileOutputOptions(destination, format string, block *int, writeMessage, writeAttachments *bool, policy mcpPolicy) (mcpFileOutputOptions, error) {
+func resolveMCPFileOutputOptions(destination, format, messageFilename string, block *int, writeMessage, writeAttachments *bool, policy mcpPolicy) (mcpFileOutputOptions, error) {
 	if format == "" {
 		format = "text"
 	}
@@ -215,11 +220,31 @@ func resolveMCPFileOutputOptions(destination, format string, block *int, writeMe
 	if !message && !attachments {
 		return mcpFileOutputOptions{}, errors.New("invalid_arguments: at least one output type must be enabled")
 	}
+	if messageFilename != "" && !message {
+		return mcpFileOutputOptions{}, errors.New("invalid_arguments: message_filename requires write_message")
+	}
+	messageFilename, err := resolveMCPMessageFilename(messageFilename, format)
+	if err != nil {
+		return mcpFileOutputOptions{}, err
+	}
 	path, err := validateMCPDestination(destination, policy)
 	if err != nil {
 		return mcpFileOutputOptions{}, err
 	}
-	return mcpFileOutputOptions{destination: path, messageFormat: format, block: blockIndex, writeMessage: message, writeAttachments: attachments}, nil
+	return mcpFileOutputOptions{destination: path, messageFormat: format, messageFilename: messageFilename, block: blockIndex, writeMessage: message, writeAttachments: attachments}, nil
+}
+
+func resolveMCPMessageFilename(value, format string) (string, error) {
+	if value == "" {
+		if format == "editorjs_json" {
+			return "message.json", nil
+		}
+		return "message.txt", nil
+	}
+	if len(value) > 255 || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", errors.New("invalid_arguments: message_filename must be a safe basename")
+	}
+	return value, nil
 }
 
 func validateMCPDestination(value string, policy mcpPolicy) (string, error) {
@@ -260,10 +285,9 @@ func materializeMCPFiles(result wipeme.DecryptResult, options mcpFileOutputOptio
 	messageWritten := false
 	used := map[string]struct{}{}
 	if options.writeMessage {
-		name := "message.txt"
+		name := options.messageFilename
 		data := []byte(nil)
 		if options.messageFormat == "editorjs_json" {
-			name = "message.json"
 			var formatted bytes.Buffer
 			if err := json.Indent(&formatted, []byte(result.Manifest.Message), "", "  "); err != nil {
 				return false, 0, err
@@ -327,10 +351,14 @@ func pendingFileOutput(handle string, record *mcpRecoveryRecord) mcpFileConsumpt
 	}
 }
 
-func successfulFileOutput(destination string, messageWritten bool, attachmentCount int) mcpFileConsumptionOutput {
+func successfulFileOutput(options mcpFileOutputOptions, messageWritten bool, attachmentCount int) mcpFileConsumptionOutput {
+	messageFilename := ""
+	if messageWritten {
+		messageFilename = options.messageFilename
+	}
 	return mcpFileConsumptionOutput{
 		Status: "consumed", MessageWritten: messageWritten, AttachmentCount: attachmentCount,
-		DestinationDirectory: destination, RecoveryDeleted: true,
+		DestinationDirectory: options.destination, MessageFilename: messageFilename, RecoveryDeleted: true,
 	}
 }
 

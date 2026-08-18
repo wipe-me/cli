@@ -511,6 +511,7 @@ type ConsumeIntoFilesInput = LinkSource & {
   passphrase_sources?: PassphraseSource[];
   destination_directory: string;
   message_format?: "text" | "editorjs_json";  // default text
+  message_filename?: string;                    // default message.txt/message.json
   block?: number;                              // optional document block index
   write_message?: boolean;                     // default true
   write_attachments?: boolean;                 // default true
@@ -522,6 +523,11 @@ type ConsumeIntoFilesInput = LinkSource & {
 - Retrieve once, persist recovery, try authenticated decryption locally, stage all
   outputs in a mode-`0700` temporary directory, then atomically rename it.
 - Message and attachment files use mode `0600`.
+- `message_filename` is a basename only: path separators, `.`, `..`, NUL, control
+  characters, and names longer than 255 bytes are rejected before retrieval. It
+  requires `write_message` to be enabled.
+- The requested message filename is preserved. Attachments colliding with it are
+  renamed deterministically with ordinal prefixes.
 - Attachment filenames use the existing traversal-safe basename behavior and must
   additionally resolve duplicate/colliding names deterministically with ordinal
   prefixes before finalization.
@@ -542,6 +548,7 @@ interface ConsumeIntoFilesResult {
   message_written: boolean;
   attachment_count: number;
   destination_directory: string;
+  message_filename?: string; // present when a message file was written
   recovery_deleted: true;
 }
 ```
@@ -570,16 +577,17 @@ interface RetryIntoFilesInput {
   recovery_handle: string;
   destination_directory: string;
   message_format?: "text" | "editorjs_json";
+  message_filename?: string;
   block?: number;
   write_message?: boolean;
   write_attachments?: boolean;
 }
 ```
 
-The operation type cannot change. A new destination is allowed after full local
-validation. Success mandatorily wipes recovery. Failure increments the attempt
-counter and retains recovery until its limit or TTL. Success returns
-`ConsumeIntoFilesResult`; another failure returns
+The operation type cannot change. A new destination and message filename are
+allowed after full local validation. Success mandatorily wipes recovery. Failure
+increments the attempt counter and retains recovery until its limit or TTL.
+Success returns `ConsumeIntoFilesResult`; another failure returns
 `PendingFileConsumptionResult`.
 
 ## 15. Tool: `consume_into_env_file`
@@ -597,7 +605,7 @@ type ConsumeIntoEnvFileInput = LinkSource & {
     name: string;
     block?: number;                // omitted: first compatible text block
   }>;
-  format?: EnvironmentFileFormat; // default dotenv
+  format?: EnvironmentFileFormat; // new file: dotenv; existing overwrite: detect
   overwrite?: boolean;            // default false
 }
 ```
@@ -621,6 +629,16 @@ type ConsumeIntoEnvFileInput = LinkSource & {
   - `systemd` writes UTF-8 double-quoted assignments following the
     `EnvironmentFile=` grammar and supports multiline values.
 - All encoders reject NUL. The result never contains an encoded line or value.
+- Every generated file starts with a non-secret `# wipeme-format: FORMAT` comment,
+  which all four consumers accept as a comment.
+- If `format` is omitted for a new destination, it defaults to `dotenv`. If it is
+  omitted with `overwrite: true` for an existing regular file, Wipe.me first uses
+  its format marker, then scores evidence across the complete file. Distinctive
+  syntax (`export`, shell shebangs, systemd comments, and encoder-specific escapes)
+  outranks filename suffixes. Plain `NAME=value` is simultaneously valid dotenv,
+  Docker, shell, and systemd syntax, so a tie with no distinguishing evidence uses
+  the documented preferred format, `dotenv`. `overwrite: false` continues to refuse
+  every existing destination before detection.
 
 ### 15.1 Host-command example
 
@@ -642,6 +660,7 @@ The following arguments map text blocks to names while keeping values out of MCP
 The tool privately materializes assignments equivalent to:
 
 ```sh
+# wipeme-format: shell
 export DATABASE_PASSWORD='[decrypted block 0]'
 export API_TOKEN='[decrypted block 1]'
 ```
@@ -751,7 +770,7 @@ interface GenerateSecretIntoEnvFileInput extends CreationControls {
   no_require_each?: boolean;
   destination_file: string;
   environment: Array<{ name: string; block?: 0 }>;
-  format?: EnvironmentFileFormat; // default dotenv
+  format?: EnvironmentFileFormat; // new file: dotenv; existing overwrite: detect
   overwrite?: boolean;            // default false
 }
 ```

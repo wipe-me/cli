@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	mcpEnvFormatDocker  = "docker"
 	mcpEnvFormatShell   = "shell"
 	mcpEnvFormatSystemd = "systemd"
+	mcpEnvFormatMarker  = "# wipeme-format: "
 )
 
 var errMCPEnvCredentialRejected = errors.New("environment file recovery credentials were rejected")
@@ -29,7 +31,7 @@ type consumeIntoEnvFileInput struct {
 	PassphraseSources []MCPPassphraseSource    `json:"passphrase_sources,omitempty"`
 	DestinationFile   string                   `json:"destination_file"`
 	Environment       []mcpEnvironmentSelector `json:"environment"`
-	Format            string                   `json:"format,omitempty" jsonschema:"dotenv (default), docker, shell, or systemd"`
+	Format            string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit for dotenv on a new file or autodetection when overwriting"`
 	Overwrite         bool                     `json:"overwrite,omitempty"`
 }
 
@@ -37,7 +39,7 @@ type retryIntoEnvFileInput struct {
 	RecoveryHandle  string                   `json:"recovery_handle"`
 	DestinationFile string                   `json:"destination_file,omitempty"`
 	Environment     []mcpEnvironmentSelector `json:"environment,omitempty"`
-	Format          string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd"`
+	Format          string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit to reuse or autodetect the destination format"`
 	Overwrite       *bool                    `json:"overwrite,omitempty"`
 	IncludeQR       bool                     `json:"include_qr,omitempty"`
 }
@@ -50,7 +52,7 @@ type generateSecretIntoEnvFileInput struct {
 	NoRequireEach   bool                     `json:"no_require_each,omitempty"`
 	DestinationFile string                   `json:"destination_file"`
 	Environment     []mcpEnvironmentSelector `json:"environment"`
-	Format          string                   `json:"format,omitempty" jsonschema:"dotenv (default), docker, shell, or systemd"`
+	Format          string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit for dotenv on a new file or autodetection when overwriting"`
 	Overwrite       bool                     `json:"overwrite,omitempty"`
 }
 
@@ -296,17 +298,136 @@ func resolveMCPEnvFileOptions(destination string, selectors []mcpEnvironmentSele
 			}
 		}
 	}
-	if format == "" {
-		format = mcpEnvFormatDotenv
-	}
-	if format != mcpEnvFormatDotenv && format != mcpEnvFormatDocker && format != mcpEnvFormatShell && format != mcpEnvFormatSystemd {
-		return mcpEnvFileOptions{}, errors.New("invalid_arguments: format must be dotenv, docker, shell, or systemd")
-	}
 	path, err := validateMCPEnvFileDestination(destination, overwrite, policy)
 	if err != nil {
 		return mcpEnvFileOptions{}, err
 	}
+	if format == "" {
+		format, err = detectMCPEnvFileFormat(path)
+		if err != nil {
+			return mcpEnvFileOptions{}, err
+		}
+	}
+	if format != mcpEnvFormatDotenv && format != mcpEnvFormatDocker && format != mcpEnvFormatShell && format != mcpEnvFormatSystemd {
+		return mcpEnvFileOptions{}, errors.New("invalid_arguments: format must be dotenv, docker, shell, or systemd")
+	}
 	return mcpEnvFileOptions{destination: path, mappings: mappings, format: format, overwrite: overwrite}, nil
+}
+
+func detectMCPEnvFileFormat(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return mcpEnvFormatDotenv, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("output_refused: existing environment file is unsafe")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errors.New("output_refused: existing environment file is unavailable")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	current, currentErr := os.Lstat(path)
+	if err != nil || currentErr != nil || !current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+		return "", errors.New("output_refused: existing environment file changed during inspection")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024))
+	if err != nil {
+		return "", errors.New("output_refused: existing environment file is unavailable")
+	}
+	defer wipe(data)
+	return classifyMCPEnvFileFormat(data, filepath.Base(path))
+}
+
+type mcpEnvFormatScores struct {
+	dotenv  int
+	docker  int
+	shell   int
+	systemd int
+}
+
+func classifyMCPEnvFileFormat(data []byte, name string) (string, error) {
+	marker := []byte(mcpEnvFormatMarker)
+	scores := mcpEnvFormatScores{}
+	for _, rawLine := range bytes.Split(data, []byte{'\n'}) {
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(line, marker) {
+			format := strings.TrimSpace(string(bytes.TrimPrefix(line, marker)))
+			if format == mcpEnvFormatDotenv || format == mcpEnvFormatDocker || format == mcpEnvFormatShell || format == mcpEnvFormatSystemd {
+				return format, nil
+			}
+			return "", errors.New("output_refused: existing environment file has an invalid Wipe.me format marker")
+		}
+		if bytes.HasPrefix(line, []byte("#!")) && shellShebang(line) {
+			scores.shell += 100
+			continue
+		}
+		if bytes.HasPrefix(line, []byte(";")) {
+			scores.systemd += 80
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("#")) {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("export ")) {
+			scores.shell += 100
+			line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("export ")))
+		}
+		separator := bytes.IndexByte(line, '=')
+		if separator <= 0 {
+			continue
+		}
+		value := bytes.TrimSpace(line[separator+1:])
+		if len(value) >= 2 && value[0] == '"' {
+			if bytes.Contains(value, []byte("\\n")) || bytes.Contains(value, []byte("\\r")) || bytes.Contains(value, []byte("\\t")) {
+				scores.dotenv += 20
+			}
+			if bytes.Contains(value, []byte("\\`")) {
+				scores.systemd += 20
+			}
+		}
+	}
+	name = strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(name, ".docker.env"), strings.HasSuffix(name, ".env.docker"), strings.HasSuffix(name, ".docker"):
+		scores.docker += 50
+	case strings.HasSuffix(name, ".systemd.env"), strings.HasSuffix(name, ".env.systemd"), strings.HasSuffix(name, ".systemd"):
+		scores.systemd += 50
+	case strings.HasSuffix(name, ".sh"), strings.HasSuffix(name, ".bash"), strings.HasSuffix(name, ".zsh"):
+		scores.shell += 50
+	case name == ".env", strings.HasSuffix(name, ".dotenv"), strings.HasSuffix(name, ".env"):
+		scores.dotenv += 10
+	}
+	return preferredMCPEnvFileFormat(scores), nil
+}
+
+func shellShebang(line []byte) bool {
+	interpreter := strings.ToLower(string(line))
+	return strings.Contains(interpreter, "/sh") || strings.Contains(interpreter, "/bash") || strings.Contains(interpreter, "/zsh") || strings.Contains(interpreter, "env sh") || strings.Contains(interpreter, "env bash") || strings.Contains(interpreter, "env zsh")
+}
+
+func preferredMCPEnvFileFormat(scores mcpEnvFormatScores) string {
+	// dotenv is the stable tie-breaker because a plain NAME=value file belongs to
+	// the shared subset of all four grammars. A different choice requires positive
+	// syntax or filename evidence; parser success alone cannot distinguish intent.
+	bestFormat, bestScore := mcpEnvFormatDotenv, scores.dotenv
+	for _, candidate := range []struct {
+		format string
+		score  int
+	}{
+		{mcpEnvFormatDocker, scores.docker},
+		{mcpEnvFormatShell, scores.shell},
+		{mcpEnvFormatSystemd, scores.systemd},
+	} {
+		if candidate.score > bestScore {
+			bestFormat, bestScore = candidate.format, candidate.score
+		}
+	}
+	return bestFormat
 }
 
 func validateMCPEnvFileMappings(selectors []mcpEnvironmentSelector) ([]mcpEnvironmentMapping, error) {
@@ -409,6 +530,9 @@ func materializeMCPEnvFile(options mcpEnvFileOptions, values map[string]string) 
 
 func encodeMCPEnvFile(format string, mappings []mcpEnvironmentMapping, values map[string]string) ([]byte, error) {
 	var output bytes.Buffer
+	output.WriteString(mcpEnvFormatMarker)
+	output.WriteString(format)
+	output.WriteByte('\n')
 	for _, mapping := range mappings {
 		value := values[mapping.Name]
 		if strings.IndexByte(value, 0) >= 0 {

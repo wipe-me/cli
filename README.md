@@ -93,8 +93,8 @@ The MCP server exposes these tools:
 | `create_from_process_output` | Encrypt stdout from an approved producer profile |
 | `consume_into_env_file` | Consume selected text blocks into a private environment file |
 | `retry_into_env_file` | Retry consumed or generated environment-file output without another retrieval or generation |
-| `consume_into_files` | Consume into a new mode-0700 directory without returning plaintext |
-| `retry_into_files` | Retry protected file output without another retrieval |
+| `consume_into_files` | Consume into a new mode-0700 directory, with an optional custom message filename |
+| `retry_into_files` | Retry protected file output and optionally revise the message filename without another retrieval |
 | `consume_into_process_env` | Consume and inject selected blocks into an approved process |
 | `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
 | `retry_process_env` | Retry a process operation without retrieving or generating again |
@@ -118,6 +118,15 @@ Use `docker` for raw `docker run --env-file` syntax; Docker values containing CR
 LF are rejected because that format cannot represent them faithfully. `shell`
 produces POSIX-sourceable `export` assignments, while `systemd` follows the
 `EnvironmentFile=` grammar. Files are atomically written with mode 0600.
+
+Generated files start with a non-secret `# wipeme-format: ...` comment. When
+`format` is omitted and `overwrite: true` targets an existing file, Wipe.me detects
+that marker automatically. For unmarked files it examines the complete file and
+ranks distinctive syntax (such as `export`, shell shebangs, and systemd comments)
+ahead of `.docker.env`, `.env.docker`, `.systemd.env`, `.env.systemd`, `.sh`, and
+related suffixes. A plain `NAME=value` file is valid in all four supported grammars;
+when no evidence distinguishes them, the documented preferred format is `dotenv`.
+An existing file is still refused when `overwrite` is false.
 
 For agent-run commands, prefer `consume_into_env_file` over
 `consume_into_process_env`. The server consumes the remote message once and leaves
@@ -149,6 +158,7 @@ The private file conceptually contains the following, with the bracketed values
 written locally from decrypted blocks and never included in the MCP response:
 
 ```sh
+# wipeme-format: shell
 export DATABASE_PASSWORD='[decrypted block 0]'
 export API_TOKEN='[decrypted block 1]'
 ```

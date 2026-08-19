@@ -100,9 +100,19 @@ Options:
         access policy: host or restricted (default host)
   -config string
         configuration file
+  -show-policy
+        print the effective non-secret MCP policy and exit
   -version
         print the version and exit before starting MCP
 ```
+
+`wipeme mcp --show-policy` applies normal configuration precedence, prints JSON,
+and exits without preparing recovery state or starting stdio JSON-RPC. It reports
+the effective access mode and whether it came from the default, configuration, or
+command line. It also reports active restricted roots and environment-name
+allowlists, process-profile names, recovery settings, and the configuration files
+that participated in resolution; it never reports secret values. This diagnoses a
+new invocation and does not query an already-running MCP process.
 
 The MCP server remains the plaintext-isolation boundary. Filesystem and environment
 authorization defaults to the local host's OS permissions and approval model;
@@ -1046,6 +1056,8 @@ The command-line `--access host|restricted` value overrides
 `mcp.access_mode`. In restricted mode, empty roots or environment allowlists deny
 the corresponding source or destination. In host mode, these allowlist fields are
 not consulted.
+Use `wipeme mcp --show-policy` to verify the fully resolved non-secret policy before
+registering or restarting the server in an MCP host.
 
 Environment overrides for MCP policy should be minimal and explicitly documented.
 Do not accept serialized process profiles or allowed roots from a single environment

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -68,14 +70,33 @@ type inspectPrivateLinkResult struct {
 	RequiresExternalPassphrase bool   `json:"requires_external_passphrase,omitempty"`
 }
 
+type mcpPolicySummary struct {
+	AccessMode            string   `json:"access_mode"`
+	AccessSource          string   `json:"access_source"`
+	ConfigFiles           []string `json:"config_files,omitempty"`
+	RestrictedAllowlists  bool     `json:"restricted_allowlists_active"`
+	AllowedReadRoots      []string `json:"allowed_read_roots,omitempty"`
+	AllowedWriteRoots     []string `json:"allowed_write_roots,omitempty"`
+	AllowedLinkEnv        []string `json:"allowed_link_env,omitempty"`
+	AllowedPassphraseEnv  []string `json:"allowed_passphrase_env,omitempty"`
+	AllowedSourceEnv      []string `json:"allowed_source_env,omitempty"`
+	ProcessProfiles       []string `json:"process_profiles,omitempty"`
+	RecoveryDirectory     string   `json:"recovery_directory"`
+	RecoveryTTL           string   `json:"recovery_ttl"`
+	RecoveryMaxAttempts   int      `json:"recovery_max_attempts"`
+	MaxEnvironmentSources int      `json:"max_environment_sources"`
+}
+
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) error {
 	flags := flag.NewFlagSet("wipeme mcp", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := ""
 	accessMode := ""
+	showPolicy := false
 	showVersion := false
 	flags.StringVar(&configPath, "config", "", "configuration file")
 	flags.StringVar(&accessMode, "access", "", "access policy: host or restricted (default host)")
+	flags.BoolVar(&showPolicy, "show-policy", false, "print the effective non-secret MCP policy and exit")
 	flags.BoolVar(&showVersion, "version", false, "print the version and exit before starting MCP")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: wipeme mcp [options]")
@@ -110,6 +131,13 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer, version st
 	policy, err := resolveMCPPolicy(settings.MCP, accessMode)
 	if err != nil {
 		return err
+	}
+	if showPolicy {
+		configFiles, err := mcpConfigPaths(configArgs)
+		if err != nil {
+			return err
+		}
+		return writeMCPPolicySummary(stdout, policy, settings.MCP, accessMode, configFiles)
 	}
 
 	store := newMCPRecoveryStore(policy)
@@ -156,6 +184,45 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer, version st
 		return errors.New("MCP server stopped because the protocol stream failed")
 	}
 	return nil
+}
+
+func writeMCPPolicySummary(writer io.Writer, policy mcpPolicy, configured *mcpYAMLConfig, accessOverride string, configFiles []string) error {
+	source := "default"
+	if configured != nil && strings.TrimSpace(configured.AccessMode) != "" {
+		source = "configuration"
+	}
+	if strings.TrimSpace(accessOverride) != "" {
+		source = "command_line"
+	}
+	summary := mcpPolicySummary{
+		AccessMode: policy.accessMode, AccessSource: source, ConfigFiles: append([]string(nil), configFiles...),
+		RestrictedAllowlists: policy.accessMode == mcpAccessRestricted,
+		ProcessProfiles:      mapKeys(policy.processProfiles), RecoveryDirectory: policy.recoveryDirectory,
+		RecoveryTTL: policy.recoveryTTL.String(), RecoveryMaxAttempts: policy.recoveryMaxAttempts,
+		MaxEnvironmentSources: policy.maxEnvironmentSources,
+	}
+	if summary.RestrictedAllowlists {
+		summary.AllowedReadRoots = append([]string(nil), policy.allowedReadRoots...)
+		summary.AllowedWriteRoots = append([]string(nil), policy.allowedWriteRoots...)
+		summary.AllowedLinkEnv = mapKeys(policy.allowedLinkEnv)
+		summary.AllowedPassphraseEnv = mapKeys(policy.allowedPassphraseEnv)
+		summary.AllowedSourceEnv = mapKeys(policy.allowedSourceEnv)
+	}
+	encoded, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(writer, "%s\n", encoded)
+	return err
+}
+
+func mapKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func newMCPServer(policy mcpPolicy, settings config, store *mcpRecoveryStore, version string) *mcpsdk.Server {

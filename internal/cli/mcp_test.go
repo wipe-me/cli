@@ -42,7 +42,7 @@ func TestMCPHelpAndVersionDoNotStartServer(t *testing.T) {
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"mcp", "--help"}, bytes.NewReader(nil), &stdout, &stderr, "test"); code != 0 || !strings.Contains(stderr.String(), "-access string") || !strings.Contains(stderr.String(), "default host") {
+	if code := Run([]string{"mcp", "--help"}, bytes.NewReader(nil), &stdout, &stderr, "test"); code != 0 || !strings.Contains(stderr.String(), "-access string") || !strings.Contains(stderr.String(), "default host") || !strings.Contains(stderr.String(), "-show-policy") {
 		t.Fatalf("MCP help does not document access policy: code=%d stderr=%q", code, stderr.String())
 	}
 }
@@ -65,6 +65,40 @@ func TestMCPAccessPolicyDefaultsToHostAndSupportsRestrictedOverride(t *testing.T
 
 	if _, err := resolveMCPPolicy(nil, "invalid"); err == nil || !strings.Contains(err.Error(), "host or restricted") {
 		t.Fatalf("expected invalid access policy error, got %v", err)
+	}
+}
+
+func TestMCPShowPolicyReportsEffectiveAccessAndExits(t *testing.T) {
+	clearConfigEnvironment(t)
+	invoke := func(args ...string) mcpPolicySummary {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		arguments := append([]string{"mcp"}, args...)
+		if code := Run(arguments, bytes.NewReader(nil), &stdout, &stderr, "test"); code != 0 {
+			t.Fatalf("args=%v code=%d stderr=%q", arguments, code, stderr.String())
+		}
+		var summary mcpPolicySummary
+		if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+			t.Fatalf("args=%v output=%q err=%v", arguments, stdout.String(), err)
+		}
+		return summary
+	}
+
+	host := invoke("--show-policy")
+	if host.AccessMode != mcpAccessHost || host.AccessSource != "default" || host.RestrictedAllowlists {
+		t.Fatalf("default summary=%#v", host)
+	}
+
+	root := t.TempDir()
+	configPath := writeTestConfig(t, fmt.Sprintf("mcp:\n  access_mode: restricted\n  allowed_read_roots: [%q]\n  allowed_write_roots: [%q]\n  allowed_source_env: [API_TOKEN]\n", root, root))
+	restricted := invoke("--config", configPath, "--show-policy")
+	if restricted.AccessMode != mcpAccessRestricted || restricted.AccessSource != "configuration" || !restricted.RestrictedAllowlists || len(restricted.AllowedWriteRoots) != 1 || restricted.AllowedWriteRoots[0] != root || len(restricted.AllowedSourceEnv) != 1 || restricted.AllowedSourceEnv[0] != "API_TOKEN" {
+		t.Fatalf("restricted summary=%#v", restricted)
+	}
+
+	overridden := invoke("--config", configPath, "--access", "host", "--show-policy")
+	if overridden.AccessMode != mcpAccessHost || overridden.AccessSource != "command_line" || overridden.RestrictedAllowlists || len(overridden.AllowedWriteRoots) != 0 {
+		t.Fatalf("overridden summary=%#v", overridden)
 	}
 }
 

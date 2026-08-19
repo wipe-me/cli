@@ -81,6 +81,18 @@ path and environment allowlists:
 wipeme mcp --access restricted
 ```
 
+Inspect the effective non-secret policy without starting an MCP server:
+
+```sh
+wipeme mcp --show-policy
+```
+
+The JSON output identifies whether access came from the built-in default, YAML
+configuration, or `--access`; restricted mode also reports its active roots and
+environment-name allowlists. Restart the MCP host after changing its launcher or
+configuration because this command resolves a new process rather than querying an
+already-running server.
+
 The MCP server exposes these tools:
 
 | Tool | Behavior |

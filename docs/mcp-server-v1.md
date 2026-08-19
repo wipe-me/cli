@@ -134,7 +134,8 @@ These requirements are mandatory and are not agent-configurable:
    requires paths to remain inside configured read and write roots.
 6. Secret output files use mode `0600`; private directories use mode `0700`.
 7. Outputs default to no-overwrite. Only environment-file tools accept explicit
-   overwrite, and they may atomically replace only a regular non-symlink file.
+   overwrite. They may atomically upsert selected names only in a regular
+   non-symlink file and must preserve every unrelated byte.
 8. Process execution uses configured profiles and `exec` directly, never a shell.
 9. Successful process execution always wipes recovery state.
 10. Successful file and environment-file materialization always wipes recovery
@@ -616,15 +617,22 @@ type ConsumeIntoEnvFileInput = LinkSource & {
     block?: number;                // omitted: first compatible text block
   }>;
   format?: EnvironmentFileFormat; // new file: dotenv; existing overwrite: detect
-  overwrite?: boolean;            // default false
+  overwrite?: boolean;            // false: refuse existing; true: preserve and upsert
 }
 ```
 
 - The destination and all mappings are validated before retrieval.
 - Names must be valid environment names, must be unique, and must not start with
   `WIPEME_`. Environment-file mappings do not require a process profile.
-- `overwrite: false` refuses an existing destination. `overwrite: true` may
-  replace only a regular, non-symlink destination.
+- `overwrite: false` refuses an existing destination. `overwrite: true` accepts only
+  a regular, non-symlink destination and performs a format-aware upsert: every
+  existing definition of a mapped name is removed and exactly one newly encoded
+  definition is appended. Unrelated assignments, comments, shebangs, blank lines,
+  and formatting are preserved byte-for-byte.
+- Quoted multiline assignments are treated as one definition for dotenv, shell,
+  and systemd. Docker assignments remain one physical line. If a mapped existing
+  definition is malformed or cannot be bounded safely, the update is refused and
+  the original file remains unchanged.
 - Output is staged beside the destination, synchronized, and installed atomically
   with mode `0600`. No-overwrite installation does not clobber a file created by
   a concurrent process.
@@ -639,8 +647,9 @@ type ConsumeIntoEnvFileInput = LinkSource & {
   - `systemd` writes UTF-8 double-quoted assignments following the
     `EnvironmentFile=` grammar and supports multiline values.
 - All encoders reject NUL. The result never contains an encoded line or value.
-- Every generated file starts with a non-secret `# wipeme-format: FORMAT` comment,
-  which all four consumers accept as a comment.
+- Every newly created file starts with a non-secret `# wipeme-format: FORMAT`
+  comment, which all four consumers accept as a comment. Existing unmarked files
+  remain unmarked so shebangs and other unrelated bytes are not moved.
 - If `format` is omitted for a new destination, it defaults to `dotenv`. If it is
   omitted with `overwrite: true` for an existing regular file, Wipe.me first uses
   its format marker, then scores evidence across the complete file. Distinctive
@@ -755,7 +764,7 @@ interface RetryIntoEnvFileInput {
   destination_file?: string;
   environment?: Array<{ name: string; block?: number }>;
   format?: EnvironmentFileFormat;
-  overwrite?: boolean;
+  overwrite?: boolean;            // false: refuse existing; true: preserve and upsert
   include_qr?: boolean;           // generated-secret recovery only
 }
 ```
@@ -781,7 +790,7 @@ interface GenerateSecretIntoEnvFileInput extends CreationControls {
   destination_file: string;
   environment: Array<{ name: string; block?: 0 }>;
   format?: EnvironmentFileFormat; // new file: dotenv; existing overwrite: detect
-  overwrite?: boolean;            // default false
+  overwrite?: boolean;            // false: refuse existing; true: preserve and upsert
 }
 ```
 

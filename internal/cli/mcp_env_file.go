@@ -22,6 +22,7 @@ const (
 	mcpEnvFormatShell   = "shell"
 	mcpEnvFormatSystemd = "systemd"
 	mcpEnvFormatMarker  = "# wipeme-format: "
+	mcpEnvFileMaxBytes  = 64 << 20
 )
 
 var errMCPEnvCredentialRejected = errors.New("environment file recovery credentials were rejected")
@@ -32,7 +33,7 @@ type consumeIntoEnvFileInput struct {
 	DestinationFile   string                   `json:"destination_file"`
 	Environment       []mcpEnvironmentSelector `json:"environment"`
 	Format            string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit for dotenv on a new file or autodetection when overwriting"`
-	Overwrite         bool                     `json:"overwrite,omitempty"`
+	Overwrite         bool                     `json:"overwrite,omitempty" jsonschema:"Allow an existing regular file and atomically upsert mapped names while preserving unrelated content."`
 }
 
 type retryIntoEnvFileInput struct {
@@ -40,7 +41,7 @@ type retryIntoEnvFileInput struct {
 	DestinationFile string                   `json:"destination_file,omitempty"`
 	Environment     []mcpEnvironmentSelector `json:"environment,omitempty"`
 	Format          string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit to reuse or autodetect the destination format"`
-	Overwrite       *bool                    `json:"overwrite,omitempty"`
+	Overwrite       *bool                    `json:"overwrite,omitempty" jsonschema:"Allow an existing regular file and atomically upsert mapped names while preserving unrelated content."`
 	IncludeQR       bool                     `json:"include_qr,omitempty"`
 }
 
@@ -53,7 +54,7 @@ type generateSecretIntoEnvFileInput struct {
 	DestinationFile string                   `json:"destination_file"`
 	Environment     []mcpEnvironmentSelector `json:"environment"`
 	Format          string                   `json:"format,omitempty" jsonschema:"dotenv, docker, shell, or systemd; omit for dotenv on a new file or autodetection when overwriting"`
-	Overwrite       bool                     `json:"overwrite,omitempty"`
+	Overwrite       bool                     `json:"overwrite,omitempty" jsonschema:"Allow an existing regular file and atomically upsert mapped names while preserving unrelated content."`
 }
 
 type mcpEnvFileOptions struct {
@@ -89,7 +90,7 @@ func registerMCPEnvFileTools(server *mcpsdk.Server, policy mcpPolicy, settings c
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "consume_into_env_file",
 		Title:       "Consume into an environment file",
-		Description: "Preferred for repeatable commands and containers: consume once and write selected text blocks to a reusable private dotenv, Docker, shell, or systemd environment file without returning plaintext.",
+		Description: "Preferred for repeatable commands and containers: consume once and write selected text blocks to a reusable private dotenv, Docker, shell, or systemd environment file without returning plaintext. Explicit overwrite upserts mapped names without discarding unrelated content.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &openWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input consumeIntoEnvFileInput) (*mcpsdk.CallToolResult, mcpEnvFileOutput, error) {
 		options, err := resolveMCPEnvFileOptions(input.DestinationFile, input.Environment, input.Format, input.Overwrite, policy, false)
@@ -149,7 +150,7 @@ func registerMCPEnvFileTools(server *mcpsdk.Server, policy mcpPolicy, settings c
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "generate_secret_into_env_file",
 		Title:       "Generate a secret into an environment file",
-		Description: "Preferred for repeatable commands and containers: generate one password, upload it, and write the same value to a reusable private environment file. Release the link only after the file is complete.",
+		Description: "Preferred for repeatable commands and containers: generate one password, upload it, and write the same value to a reusable private environment file. Explicit overwrite preserves unrelated content. Release the link only after the file is complete.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &openWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input generateSecretIntoEnvFileInput) (*mcpsdk.CallToolResult, mcpEnvFileOutput, error) {
 		options, err := resolveMCPEnvFileOptions(input.DestinationFile, input.Environment, input.Format, input.Overwrite, policy, true)
@@ -222,7 +223,7 @@ func registerMCPEnvFileTools(server *mcpsdk.Server, policy mcpPolicy, settings c
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "retry_into_env_file",
 		Title:       "Retry environment file output",
-		Description: "Retry reusable environment-file output from protected local recovery without retrieving, consuming, uploading, or generating again.",
+		Description: "Retry reusable environment-file output from protected local recovery without retrieving, consuming, uploading, or generating again. Existing-file updates preserve unrelated content.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &closedWorld},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input retryIntoEnvFileInput) (*mcpsdk.CallToolResult, mcpEnvFileOutput, error) {
 		lease, record, err := store.acquire(input.RecoveryHandle)
@@ -525,7 +526,173 @@ func materializeMCPEnvFile(options mcpEnvFileOptions, values map[string]string) 
 		return err
 	}
 	defer wipe(encoded)
+	if options.overwrite {
+		existing, found, err := readStableMCPEnvFile(options.destination)
+		if err != nil {
+			return err
+		}
+		if found {
+			defer wipe(existing)
+			merged, err := mergeMCPEnvFile(existing, encoded, options.format, options.mappings)
+			if err != nil {
+				return err
+			}
+			defer wipe(merged)
+			return writeAtomicPrivateFile(options.destination, merged, true)
+		}
+	}
 	return writeAtomicPrivateFile(options.destination, encoded, options.overwrite)
+}
+
+func readStableMCPEnvFile(path string) ([]byte, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, errors.New("output_refused: existing environment file is unsafe")
+	}
+	if info.Size() > mcpEnvFileMaxBytes {
+		return nil, false, errors.New("output_refused: existing environment file is too large to update safely")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, errors.New("output_refused: existing environment file is unavailable")
+	}
+	defer file.Close()
+	openedBefore, err := file.Stat()
+	currentBefore, currentErr := os.Lstat(path)
+	if err != nil || currentErr != nil || !currentBefore.Mode().IsRegular() || currentBefore.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedBefore, currentBefore) {
+		return nil, false, errors.New("output_refused: existing environment file changed during inspection")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, mcpEnvFileMaxBytes+1))
+	if err != nil || len(data) > mcpEnvFileMaxBytes {
+		wipe(data)
+		return nil, false, errors.New("output_refused: existing environment file is too large or unavailable")
+	}
+	openedAfter, statErr := file.Stat()
+	currentAfter, currentErr := os.Lstat(path)
+	if statErr != nil || currentErr != nil || !currentAfter.Mode().IsRegular() || currentAfter.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedBefore, openedAfter) || !os.SameFile(openedAfter, currentAfter) || openedBefore.Size() != openedAfter.Size() || !openedBefore.ModTime().Equal(openedAfter.ModTime()) {
+		wipe(data)
+		return nil, false, errors.New("output_refused: existing environment file changed while being read")
+	}
+	return data, true, nil
+}
+
+func mergeMCPEnvFile(existing, encoded []byte, format string, mappings []mcpEnvironmentMapping) ([]byte, error) {
+	if len(existing) == 0 {
+		return append([]byte(nil), encoded...), nil
+	}
+	markerEnd := bytes.IndexByte(encoded, '\n')
+	if markerEnd < 0 || markerEnd+1 >= len(encoded) {
+		return nil, errors.New("internal_error: encoded environment file is incomplete")
+	}
+	assignments := encoded[markerEnd+1:]
+	targets := make(map[string]struct{}, len(mappings))
+	for _, mapping := range mappings {
+		targets[mapping.Name] = struct{}{}
+	}
+
+	var output bytes.Buffer
+	output.Grow(len(existing) + len(assignments) + 1)
+	for offset := 0; offset < len(existing); {
+		lineEnd := bytes.IndexByte(existing[offset:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(existing)
+		} else {
+			lineEnd += offset + 1
+		}
+		name, valueStart, assignment := mcpEnvAssignment(existing[offset:lineEnd], offset, format)
+		if _, replace := targets[name]; assignment && replace {
+			recordEnd, err := mcpEnvAssignmentEnd(existing, valueStart, lineEnd, format)
+			if err != nil {
+				wipe(output.Bytes())
+				return nil, err
+			}
+			offset = recordEnd
+			continue
+		}
+		output.Write(existing[offset:lineEnd])
+		offset = lineEnd
+	}
+	if output.Len() > 0 && output.Bytes()[output.Len()-1] != '\n' {
+		output.WriteByte('\n')
+	}
+	output.Write(assignments)
+	merged := append([]byte(nil), output.Bytes()...)
+	wipe(output.Bytes())
+	return merged, nil
+}
+
+func mcpEnvAssignment(line []byte, absoluteOffset int, format string) (string, int, bool) {
+	content := bytes.TrimRight(line, "\r\n")
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 || trimmed[0] == '#' || trimmed[0] == ';' {
+		return "", 0, false
+	}
+	if bytes.HasPrefix(trimmed, []byte("export")) && len(trimmed) > len("export") && (trimmed[len("export")] == ' ' || trimmed[len("export")] == '\t') {
+		trimmed = bytes.TrimSpace(trimmed[len("export"):])
+	}
+	separator := bytes.IndexByte(trimmed, '=')
+	if separator < 0 {
+		if format == mcpEnvFormatDocker {
+			name := string(bytes.TrimSpace(trimmed))
+			if envName.MatchString(name) {
+				return name, absoluteOffset + len(content), true
+			}
+		}
+		return "", 0, false
+	}
+	name := string(bytes.TrimSpace(trimmed[:separator]))
+	if !envName.MatchString(name) {
+		return "", 0, false
+	}
+	separatorInLine := bytes.IndexByte(content, '=')
+	return name, absoluteOffset + separatorInLine + 1, true
+}
+
+func mcpEnvAssignmentEnd(data []byte, valueStart, firstLineEnd int, format string) (int, error) {
+	if format == mcpEnvFormatDocker {
+		return firstLineEnd, nil
+	}
+	var quote byte
+	escaped := false
+	for index := valueStart; index < len(data); index++ {
+		character := data[index]
+		if character == '\n' {
+			if quote != 0 || escaped {
+				escaped = false
+				continue
+			}
+			return index + 1, nil
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch quote {
+		case '\'':
+			if character == '\'' {
+				quote = 0
+			}
+		case '"':
+			if character == '\\' {
+				escaped = true
+			} else if character == '"' {
+				quote = 0
+			}
+		default:
+			if character == '\'' || character == '"' {
+				quote = character
+			} else if character == '\\' && (format == mcpEnvFormatShell || format == mcpEnvFormatSystemd) {
+				escaped = true
+			}
+		}
+	}
+	if quote != 0 || escaped {
+		return 0, errors.New("output_refused: existing target environment assignment is malformed")
+	}
+	return len(data), nil
 }
 
 func encodeMCPEnvFile(format string, mappings []mcpEnvironmentMapping, values map[string]string) ([]byte, error) {

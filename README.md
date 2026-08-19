@@ -119,8 +119,9 @@ commands. In `restricted` mode, filesystem tools are disabled until explicit
 read/write roots are configured. In the default `host` mode, they may use absolute
 paths allowed by the OS and MCP host. Both modes retain regular-file checks,
 private permissions, traversal-safe handling, and no-overwrite defaults. Only the
-environment-file tools accept an explicit `overwrite: true`, and then replace only
-a regular non-symlink file atomically. Process tools always require
+environment-file tools accept an explicit `overwrite: true`. They atomically upsert
+the selected variable names in a regular non-symlink file while preserving unrelated
+assignments, comments, shebangs, and formatting. Process tools always require
 administrator-defined profiles and execute their absolute executable directly
 without a shell.
 
@@ -131,14 +132,17 @@ LF are rejected because that format cannot represent them faithfully. `shell`
 produces POSIX-sourceable `export` assignments, while `systemd` follows the
 `EnvironmentFile=` grammar. Files are atomically written with mode 0600.
 
-Generated files start with a non-secret `# wipeme-format: ...` comment. When
+Newly created files start with a non-secret `# wipeme-format: ...` comment. When
 `format` is omitted and `overwrite: true` targets an existing file, Wipe.me detects
 that marker automatically. For unmarked files it examines the complete file and
 ranks distinctive syntax (such as `export`, shell shebangs, and systemd comments)
 ahead of `.docker.env`, `.env.docker`, `.systemd.env`, `.env.systemd`, `.sh`, and
 related suffixes. A plain `NAME=value` file is valid in all four supported grammars;
 when no evidence distinguishes them, the documented preferred format is `dotenv`.
-An existing file is still refused when `overwrite` is false.
+An existing file is still refused when `overwrite` is false. With overwrite enabled,
+every prior definition of a selected name is removed safely and one newly encoded
+definition is appended; unrelated file content is retained byte-for-byte. Malformed
+multiline definitions of a selected name are refused without changing the file.
 
 For agent-run commands, prefer `consume_into_env_file` over
 `consume_into_process_env`. The server consumes the remote message once and leaves

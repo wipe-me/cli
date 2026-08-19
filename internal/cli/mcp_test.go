@@ -819,6 +819,120 @@ func TestMCPEnvironmentFileEncodersUseExplicitNativeFormats(t *testing.T) {
 	}
 }
 
+func TestMCPEnvironmentFileOverwritePreservesUnrelatedContent(t *testing.T) {
+	mappings := []mcpEnvironmentMapping{{Name: "TARGET", Block: 0}}
+	values := map[string]string{"TARGET": "new secret"}
+	tests := []struct {
+		format   string
+		existing string
+		want     string
+	}{
+		{
+			mcpEnvFormatDotenv,
+			"# wipeme-format: dotenv\n# owned by the application\nKEEP=\"same\"\nTARGET=\"old\"\n# trailing comment\n",
+			"# wipeme-format: dotenv\n# owned by the application\nKEEP=\"same\"\n# trailing comment\nTARGET=\"new secret\"\n",
+		},
+		{
+			mcpEnvFormatDocker,
+			"# existing Docker file\nKEEP=same\nTARGET=old\nTARGET\n# trailing comment\n",
+			"# existing Docker file\nKEEP=same\n# trailing comment\nTARGET=new secret\n",
+		},
+		{
+			mcpEnvFormatShell,
+			"#!/bin/sh\n# sourced by the application\nexport KEEP='same'\nexport TARGET='old\nvalue'\n# trailing comment\n",
+			"#!/bin/sh\n# sourced by the application\nexport KEEP='same'\n# trailing comment\nexport TARGET='new secret'\n",
+		},
+		{
+			mcpEnvFormatSystemd,
+			"; managed by the application\nKEEP=\"same\"\nTARGET=\"old\nvalue\"\n# trailing comment\n",
+			"; managed by the application\nKEEP=\"same\"\n# trailing comment\nTARGET=\"new secret\"\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.format, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "application.env")
+			if err := os.WriteFile(destination, []byte(test.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			options := mcpEnvFileOptions{destination: destination, mappings: mappings, format: test.format, overwrite: true}
+			if err := materializeMCPEnvFile(options, values); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(destination)
+			info, statErr := os.Stat(destination)
+			if err != nil || statErr != nil || string(data) != test.want || info.Mode().Perm() != 0o600 {
+				t.Fatalf("data=%q want=%q mode=%v readErr=%v statErr=%v", data, test.want, info.Mode().Perm(), err, statErr)
+			}
+		})
+	}
+}
+
+func TestMCPEnvironmentFileOverwriteRefusesMalformedTargetWithoutChangingFile(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "application.env")
+	existing := []byte("# application settings\nTARGET=\"unterminated\nKEEP=untouched\n")
+	if err := os.WriteFile(destination, existing, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := mcpEnvFileOptions{
+		destination: destination, mappings: []mcpEnvironmentMapping{{Name: "TARGET", Block: 0}},
+		format: mcpEnvFormatDotenv, overwrite: true,
+	}
+	if err := materializeMCPEnvFile(options, map[string]string{"TARGET": "replacement"}); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("malformed assignment was accepted: %v", err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(data, existing) {
+		t.Fatalf("existing file changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestMCPConsumeIntoExistingEnvironmentFilePreservesUnrelatedContent(t *testing.T) {
+	const canary = "MCP_ENV_FILE_PRESERVE_CANARY"
+	document, err := encodeTextBlocks([]string{canary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, envelope, contentHash := encryptedMCPTestMessage(t, document, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	destination := filepath.Join(root, "application.env")
+	existing := "# application-owned file\nKEEP=untouched\nPRIVATE_KEY=old-value\n# trailing comment\n"
+	if err := os.WriteFile(destination, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := mcpPolicy{
+		allowedWriteRoots: []string{root}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"),
+		recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5,
+	}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_env_file",
+		Arguments: map[string]any{
+			"private_link": link, "destination_file": destination, "overwrite": true,
+			"environment": []map[string]any{{"name": "PRIVATE_KEY", "block": 0}},
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	want := "# application-owned file\nKEEP=untouched\n# trailing comment\nPRIVATE_KEY=\"" + canary + "\"\n"
+	data, readErr := os.ReadFile(destination)
+	if readErr != nil || string(data) != want {
+		t.Fatalf("environment file=%q want=%q err=%v", data, want, readErr)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatalf("environment plaintext leaked into MCP result: %s", wire)
+	}
+}
+
 func TestMCPEnvironmentFileFormatAutodetection(t *testing.T) {
 	root := t.TempDir()
 	policy := mcpPolicy{allowedWriteRoots: []string{root}}

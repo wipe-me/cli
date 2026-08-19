@@ -20,7 +20,7 @@ import (
 	"github.com/wipe-me/sdk/go/wipeme"
 )
 
-const mcpInstructions = "Wipe.me tools consume one-time messages and never return plaintext, decrypted attachments, generated secrets, passphrases, environment values, or process output. Process tools execute only administrator-approved profiles. Private links and QR images are bearer capabilities and may be retained by the MCP host transcript. Retrieval consumes the remote message; retry-capable tools use protected local recovery records. Prefer environment-file tools for commands that may be retried or repeated and for Docker or Docker Compose. Use process tools only for one immediate profile-approved execution when a persistent private file is undesirable."
+const mcpInstructions = "Wipe.me tools consume one-time messages and never return plaintext, decrypted attachments, generated secrets, passphrases, environment values, or process output. In host access mode, process tools execute direct argv commands under the MCP host's OS, container, sandbox, and approval policy; in restricted access mode they execute only administrator-approved profiles. Private links and QR images are bearer capabilities and may be retained by the MCP host transcript. Retrieval consumes the remote message; retry-capable tools use protected local recovery records. Prefer environment-file tools for commands that may be retried or repeated and for Docker or Docker Compose. Use process tools only for one immediate execution when a persistent private file is undesirable."
 
 const (
 	mcpAccessHost       = "host"
@@ -53,6 +53,8 @@ type mcpResolvedProcessProfile struct {
 	allowedSecretEnv  map[string]struct{}
 	inheritEnv        []string
 	maxStdoutBytes    int64
+	allowAnySecretEnv bool
+	inheritAllEnv     bool
 }
 
 type inspectPrivateLinkInput struct {
@@ -81,6 +83,7 @@ type mcpPolicySummary struct {
 	AllowedPassphraseEnv  []string `json:"allowed_passphrase_env,omitempty"`
 	AllowedSourceEnv      []string `json:"allowed_source_env,omitempty"`
 	ProcessProfiles       []string `json:"process_profiles,omitempty"`
+	DirectProcessCommands bool     `json:"direct_process_commands"`
 	RecoveryDirectory     string   `json:"recovery_directory"`
 	RecoveryTTL           string   `json:"recovery_ttl"`
 	RecoveryMaxAttempts   int      `json:"recovery_max_attempts"`
@@ -198,7 +201,8 @@ func writeMCPPolicySummary(writer io.Writer, policy mcpPolicy, configured *mcpYA
 		AccessMode: policy.accessMode, AccessSource: source, ConfigFiles: append([]string(nil), configFiles...),
 		RestrictedAllowlists: policy.accessMode == mcpAccessRestricted,
 		ProcessProfiles:      mapKeys(policy.processProfiles), RecoveryDirectory: policy.recoveryDirectory,
-		RecoveryTTL: policy.recoveryTTL.String(), RecoveryMaxAttempts: policy.recoveryMaxAttempts,
+		DirectProcessCommands: policy.accessMode == mcpAccessHost,
+		RecoveryTTL:           policy.recoveryTTL.String(), RecoveryMaxAttempts: policy.recoveryMaxAttempts,
 		MaxEnvironmentSources: policy.maxEnvironmentSources,
 	}
 	if summary.RestrictedAllowlists {

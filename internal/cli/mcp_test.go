@@ -85,14 +85,14 @@ func TestMCPShowPolicyReportsEffectiveAccessAndExits(t *testing.T) {
 	}
 
 	host := invoke("--show-policy")
-	if host.AccessMode != mcpAccessHost || host.AccessSource != "default" || host.RestrictedAllowlists {
+	if host.AccessMode != mcpAccessHost || host.AccessSource != "default" || host.RestrictedAllowlists || !host.DirectProcessCommands {
 		t.Fatalf("default summary=%#v", host)
 	}
 
 	root := t.TempDir()
 	configPath := writeTestConfig(t, fmt.Sprintf("mcp:\n  access_mode: restricted\n  allowed_read_roots: [%q]\n  allowed_write_roots: [%q]\n  allowed_source_env: [API_TOKEN]\n", root, root))
 	restricted := invoke("--config", configPath, "--show-policy")
-	if restricted.AccessMode != mcpAccessRestricted || restricted.AccessSource != "configuration" || !restricted.RestrictedAllowlists || len(restricted.AllowedWriteRoots) != 1 || restricted.AllowedWriteRoots[0] != root || len(restricted.AllowedSourceEnv) != 1 || restricted.AllowedSourceEnv[0] != "API_TOKEN" {
+	if restricted.AccessMode != mcpAccessRestricted || restricted.AccessSource != "configuration" || !restricted.RestrictedAllowlists || restricted.DirectProcessCommands || len(restricted.AllowedWriteRoots) != 1 || restricted.AllowedWriteRoots[0] != root || len(restricted.AllowedSourceEnv) != 1 || restricted.AllowedSourceEnv[0] != "API_TOKEN" {
 		t.Fatalf("restricted summary=%#v", restricted)
 	}
 
@@ -373,6 +373,54 @@ func TestMCPGenerateSecretReturnsLinkAndDecodableQRWithoutPlaintext(t *testing.T
 	}
 }
 
+func TestMCPGeneratedLengthDistinguishesOmittedFromInvalidValues(t *testing.T) {
+	if got, err := resolveMCPGeneratedLength(nil); err != nil || got != 32 {
+		t.Fatalf("omitted length: got=%d err=%v", got, err)
+	}
+	for _, value := range []int{8, 32, 4096} {
+		value := value
+		if got, err := resolveMCPGeneratedLength(&value); err != nil || got != value {
+			t.Fatalf("length %d: got=%d err=%v", value, got, err)
+		}
+	}
+	for _, value := range []int{-1, 0, 7, 4097} {
+		value := value
+		if _, err := resolveMCPGeneratedLength(&value); err == nil || !strings.Contains(err.Error(), "invalid_arguments") {
+			t.Fatalf("length %d: expected invalid_arguments, got %v", value, err)
+		}
+	}
+}
+
+func TestMCPGenerateSecretRejectsExplicitZeroBeforeUpload(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, cleanup := connectMCPTestClientWithConfig(t, mcpPolicy{}, config{
+		APIEndpoint: server.URL,
+		SiteURL:     "https://wipe.me",
+		Expires:     24 * time.Hour,
+	})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "generate_secret",
+		Arguments: map[string]any{"length": 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	if !result.IsError || !strings.Contains(string(encoded), "invalid_arguments") {
+		t.Fatalf("expected invalid_arguments, got %s", encoded)
+	}
+	if requests != 0 {
+		t.Fatalf("invalid length caused %d upload requests", requests)
+	}
+}
+
 func TestMCPHostAccessCreatesFromInheritedEnvWithoutReturningSourceValue(t *testing.T) {
 	const canary = "MCP_ENV_CANARY_secret-value"
 	t.Setenv("MCP_TEST_API_TOKEN", canary)
@@ -577,6 +625,61 @@ func TestMCPCreateFromApprovedProducerDoesNotReturnProcessOutput(t *testing.T) {
 	value, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
 	if !ok || value != canary {
 		t.Fatal("encrypted producer output did not round-trip")
+	}
+}
+
+func TestMCPHostModeRunsDirectProducerWithoutProfile(t *testing.T) {
+	const canary = "MCP_HOST_PROCESS_CANARY_secret-output"
+	t.Setenv("MCP_HELPER_MODE", "success")
+	t.Setenv("MCP_HELPER_SECRET", canary)
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		uploaded, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
+	}))
+	defer server.Close()
+
+	policy := mcpPolicy{accessMode: mcpAccessHost}
+	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "create_from_process_output",
+		Arguments: map[string]any{
+			"command":   os.Args[0],
+			"arguments": []string{"-test.run=^TestMCPProducerHelperProcess$"},
+			"output":    map[string]any{"mode": "text"},
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("err=%v result=%#v", err, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatal("host producer stdout leaked into MCP result")
+	}
+	var created mcpCreationResult
+	structured, _ := json.Marshal(result.StructuredContent)
+	if err := json.Unmarshal(structured, &created); err != nil {
+		t.Fatal(err)
+	}
+	application, _ := wipeme.ParseApplicationPrivateLink(created.PrivateLink)
+	messageID, secret, _ := application.EnvelopeCryptoParameters()
+	decrypted, err := wipeme.Decrypt(bytes.NewReader(uploaded), messageID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := selectText(parseDocument(decrypted.Manifest.Message), -1)
+	if !ok || value != canary {
+		t.Fatal("host command output did not round-trip through encryption")
+	}
+}
+
+func TestMCPHostModeAcceptsLegacyProfileFieldAsCommand(t *testing.T) {
+	resolved, storedProfile, storedCommand, err := resolveMCPProcessCall(mcpPolicy{accessMode: mcpAccessHost}, "echo", "", "consumer", nil)
+	if err != nil || resolved.executable == "" || storedProfile != "" || storedCommand != "echo" {
+		t.Fatalf("resolved=%#v profile=%q command=%q err=%v", resolved, storedProfile, storedCommand, err)
 	}
 }
 
@@ -1223,6 +1326,76 @@ func TestMCPConsumeIntoApprovedProcessDoesNotReturnPlaintext(t *testing.T) {
 	childValue, err := os.ReadFile(resultFile)
 	if err != nil || string(childValue) != canary {
 		t.Fatalf("child value=%q err=%v", childValue, err)
+	}
+}
+
+func TestMCPHostModeConsumesIntoDirectCommandWithoutProfile(t *testing.T) {
+	const canary = "MCP_HOST_CONSUMER_CANARY_private-message"
+	link, envelope, contentHash := encryptedMCPTestMessage(t, canary, nil)
+	resultFile := filepath.Join(t.TempDir(), "child-result")
+	t.Setenv("MCP_HELPER_MODE", "consumer_success")
+	t.Setenv("MCP_HELPER_RESULT", resultFile)
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		writer.Header().Set("X-Wipe-Content-Hash", contentHash)
+		writer.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = writer.Write(envelope)
+	}))
+	defer server.Close()
+	policy := mcpPolicy{
+		accessMode: mcpAccessHost, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"),
+		recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5,
+	}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_process_env",
+		Arguments: map[string]any{
+			"private_link": link,
+			"command":      os.Args[0],
+			"arguments":    []string{"-test.run=^TestMCPProducerHelperProcess$"},
+			"environment":  []map[string]any{{"name": "TARGET_SECRET"}},
+		},
+	})
+	if err != nil || result.IsError || gets != 1 {
+		t.Fatalf("err=%v gets=%d result=%#v", err, gets, result)
+	}
+	wire, _ := json.Marshal(result)
+	if bytes.Contains(wire, []byte(canary)) {
+		t.Fatalf("host consumer plaintext leaked into MCP result: %s", wire)
+	}
+	childValue, err := os.ReadFile(resultFile)
+	if err != nil || string(childValue) != canary {
+		t.Fatalf("child value=%q err=%v", childValue, err)
+	}
+}
+
+func TestMCPRestrictedModeRejectsDirectCommandBeforeConsumption(t *testing.T) {
+	link, _, _ := encryptedMCPTestMessage(t, "not consumed", nil)
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets++
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	policy := mcpPolicy{accessMode: mcpAccessRestricted, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
+	defer cleanup()
+	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "consume_into_process_env",
+		Arguments: map[string]any{
+			"private_link": link,
+			"command":      os.Args[0],
+			"environment":  []map[string]any{{"name": "TARGET_SECRET"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(result)
+	if !result.IsError || !bytes.Contains(wire, []byte("profile_argument_rejected")) || gets != 0 {
+		t.Fatalf("result=%s gets=%d", wire, gets)
 	}
 }
 

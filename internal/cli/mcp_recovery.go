@@ -26,6 +26,7 @@ type mcpRecoveryRecord struct {
 	Manual           bool                    `json:"manual,omitempty"`
 	Candidates       []string                `json:"candidates,omitempty"`
 	Profile          string                  `json:"profile,omitempty"`
+	Command          string                  `json:"command,omitempty"`
 	Arguments        []string                `json:"arguments,omitempty"`
 	Environment      []mcpEnvironmentMapping `json:"environment,omitempty"`
 	EnvironmentName  string                  `json:"environment_name,omitempty"`

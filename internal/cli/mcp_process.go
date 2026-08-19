@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wipe-me/cli/internal/media"
@@ -24,7 +25,8 @@ type mcpProducerOutput struct {
 
 type createFromProcessOutputInput struct {
 	MCPCreationControls
-	Profile         string            `json:"profile"`
+	Command         string            `json:"command,omitempty" jsonschema:"Executable name or path in host mode; arguments are passed directly without a shell."`
+	Profile         string            `json:"profile,omitempty" jsonschema:"Administrator-defined process profile required in restricted mode."`
 	Arguments       []string          `json:"arguments,omitempty"`
 	StdinFile       string            `json:"stdin_file,omitempty"`
 	Output          mcpProducerOutput `json:"output"`
@@ -36,7 +38,7 @@ func registerMCPProducerTool(server *mcpsdk.Server, policy mcpPolicy, settings c
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "create_from_process_output",
 		Title:       "Create from approved process output",
-		Description: "Run an administrator-approved producer profile and encrypt its stdout without returning process output or message plaintext.",
+		Description: "Run a direct argv command in host mode or an administrator-approved producer profile in restricted mode, then encrypt stdout without returning process output or message plaintext.",
 		Annotations: &mcpsdk.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: &destructive,
@@ -44,7 +46,7 @@ func registerMCPProducerTool(server *mcpsdk.Server, policy mcpPolicy, settings c
 			OpenWorldHint:   &openWorld,
 		},
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input createFromProcessOutputInput) (*mcpsdk.CallToolResult, mcpCreationResult, error) {
-		profile, err := validateMCPProfileCall(policy, input.Profile, "producer", input.Arguments)
+		profile, _, _, err := resolveMCPProcessCall(policy, input.Profile, input.Command, "producer", input.Arguments)
 		if err != nil {
 			return nil, mcpCreationResult{}, err
 		}
@@ -113,6 +115,38 @@ func registerMCPProducerTool(server *mcpsdk.Server, policy mcpPolicy, settings c
 	})
 }
 
+func resolveMCPProcessCall(policy mcpPolicy, profileName, command, role string, arguments []string) (mcpResolvedProcessProfile, string, string, error) {
+	if policy.accessMode != mcpAccessHost {
+		if command != "" {
+			return mcpResolvedProcessProfile{}, "", "", errors.New("profile_argument_rejected: direct commands require host access mode")
+		}
+		profile, err := validateMCPProfileCall(policy, profileName, role, arguments)
+		return profile, profileName, "", err
+	}
+	if command != "" && profileName != "" {
+		return mcpResolvedProcessProfile{}, "", "", errors.New("invalid_arguments: command and profile cannot be used together")
+	}
+	if command == "" {
+		// Compatibility for early v0.3 clients whose schema exposed only `profile`.
+		command = profileName
+	}
+	if strings.TrimSpace(command) == "" || strings.ContainsRune(command, '\x00') {
+		return mcpResolvedProcessProfile{}, "", "", errors.New("invalid_arguments: command is required in host mode")
+	}
+	executable, err := exec.LookPath(command)
+	if err != nil {
+		return mcpResolvedProcessProfile{}, "", "", errors.New("command_unavailable: process executable is unavailable")
+	}
+	info, err := os.Stat(executable)
+	if err != nil || !info.Mode().IsRegular() {
+		return mcpResolvedProcessProfile{}, "", "", errors.New("command_unavailable: process executable is unavailable")
+	}
+	return mcpResolvedProcessProfile{
+		role: role, executable: executable, acceptedExitCodes: map[int]struct{}{0: {}},
+		maxStdoutBytes: 16 * 1024 * 1024, allowAnySecretEnv: true, inheritAllEnv: true,
+	}, "", command, nil
+}
+
 func validateMCPProfileCall(policy mcpPolicy, name, role string, arguments []string) (mcpResolvedProcessProfile, error) {
 	profile, ok := policy.processProfiles[name]
 	if !ok {
@@ -150,12 +184,12 @@ func validateMCPProfileCall(policy mcpPolicy, name, role string, arguments []str
 }
 
 func runMCPProducer(parent context.Context, profile mcpResolvedProcessProfile, arguments []string, stdinPath string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, profile.timeout)
+	ctx, cancel := mcpProcessContext(parent, profile.timeout)
 	defer cancel()
 	argv := append(append([]string(nil), profile.fixedArgs...), arguments...)
 	command := exec.CommandContext(ctx, profile.executable, argv...)
 	command.Dir = profile.workingDirectory
-	command.Env = minimalMCPEnvironment(profile.inheritEnv)
+	command.Env = mcpProcessEnvironment(profile)
 	command.Stderr = io.Discard
 	if stdinPath != "" {
 		handle, err := os.Open(stdinPath)
@@ -190,6 +224,20 @@ func runMCPProducer(parent context.Context, profile mcpResolvedProcessProfile, a
 		return nil, errors.New("producer_failed: producer returned an unaccepted exit status")
 	}
 	return append([]byte(nil), output.Bytes()...), nil
+}
+
+func mcpProcessContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+	return context.WithCancel(parent)
+}
+
+func mcpProcessEnvironment(profile mcpResolvedProcessProfile) []string {
+	if profile.inheritAllEnv {
+		return append([]string(nil), os.Environ()...)
+	}
+	return minimalMCPEnvironment(profile.inheritEnv)
 }
 
 func minimalMCPEnvironment(names []string) []string {

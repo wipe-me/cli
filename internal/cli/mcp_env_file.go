@@ -47,7 +47,7 @@ type retryIntoEnvFileInput struct {
 
 type generateSecretIntoEnvFileInput struct {
 	MCPCreationControls
-	Length          int                      `json:"length,omitempty"`
+	Length          *int                     `json:"length,omitempty" jsonschema:"Generated password length from 8 through 4096; omit for 32."`
 	Chars           string                   `json:"chars,omitempty"`
 	Alphabet        string                   `json:"alphabet,omitempty"`
 	NoRequireEach   bool                     `json:"no_require_each,omitempty"`
@@ -169,9 +169,9 @@ func registerMCPEnvFileTools(server *mcpsdk.Server, policy mcpPolicy, settings c
 			return nil, mcpEnvFileOutput{}, err
 		}
 		defer func() { passphrase = "" }()
-		length := input.Length
-		if length == 0 {
-			length = passwordgen.DefaultLength
+		length, err := resolveMCPGeneratedLength(input.Length)
+		if err != nil {
+			return nil, mcpEnvFileOutput{}, err
 		}
 		generated, err := passwordgen.Generate(passwordgen.Options{Length: length, Preset: input.Chars, Alphabet: input.Alphabet, NoRequireEach: input.NoRequireEach})
 		if err != nil {

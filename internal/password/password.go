@@ -10,6 +10,8 @@ import (
 
 const (
 	DefaultLength = 32
+	MinLength     = 8
+	MaxLength     = 4096
 	Portable      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=+.,:@%"
 	Alnum         = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	Base58        = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -28,8 +30,8 @@ func GenerateFrom(source io.Reader, o Options) ([]byte, error) {
 	if o.Length == 0 {
 		o.Length = DefaultLength
 	}
-	if o.Length < 8 || o.Length > 4096 {
-		return nil, fmt.Errorf("password length must be between 8 and 4096")
+	if o.Length < MinLength || o.Length > MaxLength {
+		return nil, fmt.Errorf("password length must be between %d and %d", MinLength, MaxLength)
 	}
 	if o.Alphabet != "" && o.Preset != "" {
 		return nil, fmt.Errorf("--chars and --alphabet cannot be used together")

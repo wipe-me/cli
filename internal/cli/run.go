@@ -502,6 +502,9 @@ func parseFlags(args []string, stderr io.Writer) (config, []string, error) {
 	}
 	explicitFlags := make(map[string]bool)
 	flags.Visit(func(item *flag.Flag) { explicitFlags[item.Name] = true })
+	if explicitFlags["length"] && (settings.Length < passwordgen.MinLength || settings.Length > passwordgen.MaxLength) {
+		return config{}, nil, fmt.Errorf("--length must be between %d and %d", passwordgen.MinLength, passwordgen.MaxLength)
+	}
 	if explicitFlags["server-url"] {
 		if !explicitFlags["api-url"] && !settings.APIConfigured {
 			settings.APIEndpoint = settings.ServerURL
@@ -593,6 +596,9 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return e
 		}
 		defer wipeStrings(candidates)
+		if len(candidates) > defaultPassphraseAttempts {
+			candidates = candidates[:defaultPassphraseAttempts]
+		}
 		for _, candidate := range candidates {
 			id, secret, e := wipeme.DeriveCustomCryptoParameters(candidate, application.MessageID)
 			if e != nil {
@@ -607,8 +613,8 @@ func runDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			}
 		}
 		if !deleted && !o.nonInteractive && (o.prompt || isTerminal(stdin)) {
-			for i := 0; i < 3 && !deleted; i++ {
-				candidate, e := readTTYPassphrase()
+			for attempt := len(candidates) + 1; attempt <= defaultPassphraseAttempts && !deleted; attempt++ {
+				candidate, e := readTTYPassphrase(attempt, defaultPassphraseAttempts)
 				if e != nil {
 					break
 				}

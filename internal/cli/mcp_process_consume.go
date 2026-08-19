@@ -28,18 +28,20 @@ type mcpEnvironmentMapping struct {
 type consumeIntoProcessEnvInput struct {
 	MCPLinkSource
 	PassphraseSources []MCPPassphraseSource    `json:"passphrase_sources,omitempty"`
-	Profile           string                   `json:"profile"`
+	Command           string                   `json:"command,omitempty" jsonschema:"Executable name or path in host mode; arguments are passed directly without a shell."`
+	Profile           string                   `json:"profile,omitempty" jsonschema:"Administrator-defined process profile required in restricted mode."`
 	Arguments         []string                 `json:"arguments,omitempty"`
 	Environment       []mcpEnvironmentSelector `json:"environment"`
 }
 
 type generateSecretIntoProcessEnvInput struct {
 	MCPCreationControls
-	Length          int      `json:"length,omitempty"`
+	Length          *int     `json:"length,omitempty" jsonschema:"Generated password length from 8 through 4096; omit for 32."`
 	Chars           string   `json:"chars,omitempty"`
 	Alphabet        string   `json:"alphabet,omitempty"`
 	NoRequireEach   bool     `json:"no_require_each,omitempty"`
-	Profile         string   `json:"profile"`
+	Command         string   `json:"command,omitempty" jsonschema:"Executable name or path in host mode; arguments are passed directly without a shell."`
+	Profile         string   `json:"profile,omitempty" jsonschema:"Administrator-defined process profile required in restricted mode."`
 	Arguments       []string `json:"arguments,omitempty"`
 	EnvironmentName string   `json:"environment_name"`
 }
@@ -86,10 +88,10 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "consume_into_process_env",
 		Title:       "Consume into an approved process",
-		Description: "For one immediate run, consume a one-time message and inject selected text blocks into an administrator-approved process without returning plaintext or process output. Prefer consume_into_env_file for repeatable or retry-prone commands.",
+		Description: "For one immediate run, consume a one-time message and inject selected text blocks into a direct argv command in host mode or an approved profile in restricted mode, without returning plaintext or process output. Prefer consume_into_env_file for repeatable or retry-prone commands.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input consumeIntoProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
-		profile, err := validateMCPProfileCall(policy, input.Profile, "consumer", input.Arguments)
+		profile, storedProfile, storedCommand, err := resolveMCPProcessCall(policy, input.Profile, input.Command, "consumer", input.Arguments)
 		if err != nil {
 			return nil, mcpProcessExecutionOutput{}, err
 		}
@@ -125,7 +127,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 		record := &mcpRecoveryRecord{
 			Type: "consume_process", Envelope: append([]byte(nil), retrieved.Envelope...), MessageID: application.MessageID,
 			Secret: application.Secret, Manual: application.CustomPassphrase, Candidates: append([]string(nil), candidates...),
-			Profile: input.Profile, Arguments: append([]string(nil), input.Arguments...), Environment: mappings, Attempt: 1,
+			Profile: storedProfile, Command: storedCommand, Arguments: append([]string(nil), input.Arguments...), Environment: mappings, Attempt: 1,
 		}
 		handle, err := store.create(record)
 		if err != nil {
@@ -157,10 +159,10 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "generate_secret_into_process_env",
 		Title:       "Generate and inject a private secret",
-		Description: "For one immediate run, generate one password, upload it, and inject the same value into an approved process. Prefer generate_secret_into_env_file for repeatable or retry-prone commands.",
+		Description: "For one immediate run, generate one password, upload it, and inject the same value into a direct argv command in host mode or an approved profile in restricted mode. Prefer generate_secret_into_env_file for repeatable or retry-prone commands.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input generateSecretIntoProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
-		profile, err := validateMCPProfileCall(policy, input.Profile, "consumer", input.Arguments)
+		profile, storedProfile, storedCommand, err := resolveMCPProcessCall(policy, input.Profile, input.Command, "consumer", input.Arguments)
 		if err != nil {
 			return nil, mcpProcessExecutionOutput{}, err
 		}
@@ -176,9 +178,9 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 			return nil, mcpProcessExecutionOutput{}, err
 		}
 		defer func() { passphrase = "" }()
-		length := input.Length
-		if length == 0 {
-			length = passwordgen.DefaultLength
+		length, err := resolveMCPGeneratedLength(input.Length)
+		if err != nil {
+			return nil, mcpProcessExecutionOutput{}, err
 		}
 		generated, err := passwordgen.Generate(passwordgen.Options{Length: length, Preset: input.Chars, Alphabet: input.Alphabet, NoRequireEach: input.NoRequireEach})
 		if err != nil {
@@ -205,7 +207,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 		}
 		record := &mcpRecoveryRecord{
 			Type: "generate_process", MessageID: application.MessageID, Secret: application.Secret, Manual: manual,
-			Candidates: []string{candidate}, Profile: input.Profile, Arguments: append([]string(nil), input.Arguments...),
+			Candidates: []string{candidate}, Profile: storedProfile, Command: storedCommand, Arguments: append([]string(nil), input.Arguments...),
 			EnvironmentName: input.EnvironmentName, GeneratedSecret: string(generated), PrivateLink: created.PrivateLink,
 			MessageExpiresAt: created.ExpiresAt, AttachmentCount: created.AttachmentCount, CreatorSecret: creatorSecret,
 			ReceiptFile: receiptPath, LinkFile: linkPath, Attempt: 1,
@@ -244,7 +246,7 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "retry_process_env",
 		Title:       "Retry an approved process",
-		Description: "Retry a single-run process operation from protected local recovery without another retrieval or secret generation. Prefer reusable environment files when multiple executions may be needed.",
+		Description: "Retry the same host command or restricted-mode process profile from protected local recovery without another retrieval or secret generation. Prefer reusable environment files when multiple executions may be needed.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input retryProcessEnvInput) (*mcpsdk.CallToolResult, mcpProcessExecutionOutput, error) {
 		lease, record, err := store.acquire(input.RecoveryHandle)
@@ -260,10 +262,11 @@ func registerMCPProcessConsumptionTools(server *mcpsdk.Server, policy mcpPolicy,
 		if arguments == nil {
 			arguments = record.Arguments
 		}
-		profile, err := validateMCPProfileCall(policy, record.Profile, "consumer", arguments)
+		profile, storedProfile, storedCommand, err := resolveMCPProcessCall(policy, record.Profile, record.Command, "consumer", arguments)
 		if err != nil {
 			return nil, mcpProcessExecutionOutput{}, err
 		}
+		record.Profile, record.Command = storedProfile, storedCommand
 		record.Arguments = append([]string(nil), arguments...)
 		record.Attempt++
 		var environment map[string]string
@@ -357,7 +360,7 @@ func validateMCPEnvironmentName(profile mcpResolvedProcessProfile, name string) 
 	if !envName.MatchString(name) || strings.HasPrefix(name, "WIPEME_") {
 		return errors.New("invalid_arguments: invalid or protected environment name")
 	}
-	if _, allowed := profile.allowedSecretEnv[name]; !allowed {
+	if _, allowed := profile.allowedSecretEnv[name]; !profile.allowAnySecretEnv && !allowed {
 		return errors.New("profile_argument_rejected: environment name is not allowed by the process profile")
 	}
 	return nil
@@ -378,12 +381,12 @@ func selectMCPEnvironment(result wipeme.DecryptResult, mappings []mcpEnvironment
 }
 
 func runMCPConsumer(parent context.Context, profile mcpResolvedProcessProfile, arguments []string, secrets map[string]string) mcpProcessRun {
-	ctx, cancel := context.WithTimeout(parent, profile.timeout)
+	ctx, cancel := mcpProcessContext(parent, profile.timeout)
 	defer cancel()
 	argv := append(append([]string(nil), profile.fixedArgs...), arguments...)
 	command := exec.CommandContext(ctx, profile.executable, argv...)
 	command.Dir = profile.workingDirectory
-	environment := minimalMCPEnvironment(profile.inheritEnv)
+	environment := mcpProcessEnvironment(profile)
 	for name, value := range secrets {
 		environment = removeEnv(environment, name)
 		environment = append(environment, name+"="+value)

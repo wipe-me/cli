@@ -59,6 +59,71 @@ func TestManualCandidateFallbackUsesOneRetrieval(t *testing.T) {
 	}
 }
 
+func TestInteractiveManualPassphraseFallsBackAfterWrongEnvironmentCandidate(t *testing.T) {
+	public := "aBc1dEf2"
+	passphrase := "correct horse battery staple"
+	id, secret, err := wipeme.DeriveCustomCryptoParameters(passphrase, public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, _ := encryptedFixture(t, id, secret, "interactive fallback value")
+	link := wipeme.ApplicationLink{MessageID: public, CustomPassphrase: true}
+	prompts := 0
+	result, err := decryptWithPassphraseFallback(envelope, link, []string{"wrong environment value"}, true, func(attempt, maximum int) (string, error) {
+		prompts++
+		if attempt != 2 || maximum != defaultPassphraseAttempts {
+			t.Fatalf("prompt attempt=%d maximum=%d", attempt, maximum)
+		}
+		return passphrase, nil
+	})
+	if err != nil || result.Manifest.Message != "interactive fallback value" || prompts != 1 {
+		t.Fatalf("result=%#v prompts=%d err=%v", result.Manifest, prompts, err)
+	}
+	wipe(result.DeletionKey[:])
+	wipeResult(&result)
+}
+
+func TestInteractiveManualPassphraseHasFiveTotalAttempts(t *testing.T) {
+	public := "aBc1dEf2"
+	passphrase := "correct horse battery staple"
+	id, secret, err := wipeme.DeriveCustomCryptoParameters(passphrase, public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, _ := encryptedFixture(t, id, secret, "never opened")
+	link := wipeme.ApplicationLink{MessageID: public, CustomPassphrase: true}
+	prompts := 0
+	_, err = decryptWithPassphraseFallback(envelope, link, []string{"wrong environment value"}, true, func(attempt, maximum int) (string, error) {
+		prompts++
+		if attempt != prompts+1 || maximum != defaultPassphraseAttempts {
+			t.Fatalf("prompt=%d attempt=%d maximum=%d", prompts, attempt, maximum)
+		}
+		return fmt.Sprintf("wrong prompted value %d", prompts), nil
+	})
+	if err == nil || prompts != defaultPassphraseAttempts-1 {
+		t.Fatalf("prompts=%d err=%v", prompts, err)
+	}
+}
+
+func TestAutomaticLinkFailureNeverPromptsForManualPassphrase(t *testing.T) {
+	correct := wipeme.ApplicationLink{MessageID: "aB1cD2eF3", Secret: "123456789oab"}
+	id, secret, err := correct.EnvelopeCryptoParameters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, _ := encryptedFixture(t, id, secret, "automatic value")
+	wrong := correct
+	wrong.Secret = "222222222222"
+	prompts := 0
+	_, err = decryptWithPassphraseFallback(envelope, wrong, []string{wrong.Secret}, true, func(_, _ int) (string, error) {
+		prompts++
+		return correct.Secret, nil
+	})
+	if err == nil || prompts != 0 {
+		t.Fatalf("automatic failure prompts=%d err=%v", prompts, err)
+	}
+}
+
 func TestExecInjectsWithoutLeakingAndRemovesCredentialEnvironment(t *testing.T) {
 	clearConfigEnvironment(t)
 	app := wipeme.ApplicationLink{MessageID: "aB1cD2eF3", Secret: "123456789oab"}

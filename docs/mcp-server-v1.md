@@ -54,10 +54,10 @@ reuse window.
 - No tool claims to modify the already-running MCP host or agent environment. An
   MCP server process cannot modify its parent's environment. Environment-file
   tools write only an explicit private destination; process tools inject secrets
-  only into approved child processes.
-- No general-purpose plaintext session, environment handle, arbitrary command
-  executor, shell export returned through MCP, clipboard mutation or direct-read
-  tool is exposed.
+  only into host-authorized or restricted-profile child processes.
+- No general-purpose plaintext session, environment handle, output-returning
+  command executor, implicit shell, shell export returned through MCP, clipboard
+  mutation or direct-read tool is exposed.
 - No streamable HTTP transport is included in v1. Local filesystem and process
   capabilities remain local to the stdio server.
 - No stdin attachment or passphrase source is exposed because stdin is the MCP
@@ -80,7 +80,8 @@ reuse window.
   client negotiated support. Never print the CLI progress bar in MCP mode.
 - Publish short server instructions. Their first 512 characters must state that
   tools consume one-time messages, never return plaintext, and that process tools
-  execute only administrator-approved profiles.
+  use direct host-authorized argv commands in host mode or administrator-approved
+  profiles in restricted mode.
 
 For Codex, local installation is:
 
@@ -195,6 +196,11 @@ file/environment source in request order, deduplicate byte-identical candidates,
 retrieve the envelope at most once, and use authenticated decryption rather than
 plaintext plausibility to select a candidate. To use the conventional environment
 variable, pass `{ "passphrase_env": "WIPEME_PASSPHRASE" }` explicitly.
+If every MCP credential candidate fails authenticated decryption, the server returns
+`credential_rejected`, deletes its local recovery record, and offers no passphrase
+retry. The remote message has already been consumed. MCP hosts must therefore
+collect all intended passphrase sources before invoking a consumption tool; only
+the interactive human CLI keeps the ciphertext in memory for hidden prompt fallback.
 
 ### 4.3 Creation controls
 
@@ -260,10 +266,20 @@ silently create a second message with a new ID. Return a sanitized
 `creation_uncertain` result only when the SDK can safely provide the original
 capability; otherwise return a stable error.
 
-## 5. Process profiles
+## 5. Host commands and restricted process profiles
 
-Agents never provide executable paths or shell command strings. They select an
-administrator-defined profile:
+Process authorization follows the selected access mode:
+
+- `host` accepts a direct executable name or path in `command`. `arguments` is an
+  argv array passed directly without implicit shell parsing. The process inherits
+  the MCP server environment, and the desktop host's OS account, container,
+  sandbox, and tool-approval flow govern access. Wipe.me still suppresses consumer
+  streams and never returns producer output outside the encrypted message.
+- `restricted` rejects `command`. Agents select an administrator-defined `profile`,
+  and Wipe.me enforces its executable, argv, environment, directory, timeout, exit,
+  and output policies before retrieval, generation, or upload.
+
+Example restricted profile:
 
 ```yaml
 mcp:
@@ -297,6 +313,12 @@ Profile rules:
   review.
 - Producer stderr is discarded. Producer stdout is secret input and is never
   returned.
+
+For compatibility with the first v0.3 development build, host mode temporarily
+accepts `profile` as an alias for `command` when `command` is omitted. New clients
+must use `command`; supplying both is invalid. Retries retain the originally
+validated command or profile and never permit switching targets. Configured
+profiles are consulted only in restricted mode.
 
 ## 6. Recovery model
 
@@ -356,7 +378,7 @@ block contains it, and returns only the link.
 
 ```ts
 interface GenerateSecretInput extends CreationControls {
-  length?: number;                    // default 32
+  length?: number;                    // omit for 32; explicit value: 8..4096
   chars?: "portable" | "alnum" | "base58" | "base64url" |
           "hex" | "digits" | "letters" | "ascii";
   alphabet?: string;
@@ -368,6 +390,8 @@ interface GenerateSecretInput extends CreationControls {
 - `chars` defaults to `portable`.
 - `chars` and `alphabet` are mutually exclusive.
 - Custom alphabet validation and class requirements exactly match the existing CLI.
+- Omitting `length` selects 32. Every explicit value must be from 8 through 4096;
+  zero and negative values are invalid rather than aliases for the default.
 - Password length constraints and unbiased generation reuse `internal/password`.
 - The generated password is never included in tool content, structured output,
   logs, errors, receipts visible through MCP, or QR data except as encrypted message
@@ -383,11 +407,12 @@ consumer process and releases the link only after an accepted exit code.
 
 ```ts
 interface GenerateSecretIntoProcessEnvInput extends CreationControls {
-  length?: number;
+  length?: number;                    // omit for 32; explicit value: 8..4096
   chars?: GenerateSecretInput["chars"];
   alphabet?: string;
   no_require_each?: boolean;
-  profile: string;
+  command?: string;                     // host mode
+  profile?: string;                     // restricted mode
   arguments?: string[];
   environment_name: string;
 }
@@ -395,11 +420,12 @@ interface GenerateSecretIntoProcessEnvInput extends CreationControls {
 
 Execution flow:
 
-1. Validate every local option and process profile.
+1. Validate every local option and direct host command or restricted profile.
 2. Generate the password once.
 3. Encrypt and upload the message.
 4. Persist recovery before starting the child.
-5. Inject the exact generated password into the profile-approved environment name.
+5. Inject the exact generated password into the requested host environment name or
+   profile-approved restricted environment name.
 6. Start the process directly with no inherited MCP streams.
 7. On an accepted exit code, return the link and optional QR, then mandatorily wipe
    recovery state.
@@ -441,6 +467,25 @@ interface GeneratedExecutionSuccess {
 The generated remote message remains hidden until execution succeeds. Abandoning
 this recovery type must delete the remote message before wiping local capability
 material.
+
+For example, host mode can pass a newly generated secret to a one-shot Docker
+container without a Wipe.me profile:
+
+```json
+{
+  "command": "docker",
+  "arguments": [
+    "run", "--rm", "--env", "DATABASE_PASSWORD", "example/migrate:latest"
+  ],
+  "environment_name": "DATABASE_PASSWORD",
+  "length": 32,
+  "chars": "portable"
+}
+```
+
+Wipe.me injects `DATABASE_PASSWORD` into the `docker` client process; Docker's
+`--env DATABASE_PASSWORD` forwards the inherited value to the container. Neither
+the generated value nor child output is returned through MCP.
 
 ## 10. Tool: `create_from_files`
 
@@ -487,11 +532,13 @@ Result: `CreationResult`.
 
 ## 12. Tool: `create_from_process_output`
 
-Runs an approved producer profile and encrypts its stdout without exposing it.
+Runs a direct host command or restricted producer profile and encrypts its stdout
+without exposing it.
 
 ```ts
 interface CreateFromProcessOutputInput extends CreationControls {
-  profile: string;
+  command?: string;                   // host mode
+  profile?: string;                   // restricted mode
   arguments?: string[];
   stdin_file?: string;
   output:
@@ -501,8 +548,9 @@ interface CreateFromProcessOutputInput extends CreationControls {
 }
 ```
 
-- Validate the complete profile, argv, stdin file and attachments before execution.
-- Capture stdout up to the profile maximum. Exceeding the limit kills the producer
+- Validate the command/profile, argv, stdin file and attachments before execution.
+- Capture stdout up to the configured restricted-profile limit or the host-mode
+  operational limit. Exceeding the limit kills the producer
   and uploads nothing.
 - A non-accepted producer exit uploads nothing.
 - Never capture producer stderr into the message or return it.
@@ -783,7 +831,7 @@ and releases the private link only after file installation succeeds.
 
 ```ts
 interface GenerateSecretIntoEnvFileInput extends CreationControls {
-  length?: number;
+  length?: number;                    // omit for 32; explicit value: 8..4096
   chars?: GenerateSecretInput["chars"];
   alphabet?: string;
   no_require_each?: boolean;
@@ -803,8 +851,8 @@ reachable.
 
 ## 18. Tool: `consume_into_process_env`
 
-Consumes a message and injects selected compatible text blocks into an approved
-consumer process.
+Consumes a message and injects selected compatible text blocks into a direct host
+command or restricted consumer profile.
 
 This is the single-execution path. Prefer `consume_into_env_file` when a command
 may need retries, validation runs, restarts, Docker/Compose, or multiple invocations.
@@ -812,7 +860,8 @@ may need retries, validation runs, restarts, Docker/Compose, or multiple invocat
 ```ts
 type ConsumeIntoProcessEnvInput = LinkSource & {
   passphrase_sources?: PassphraseSource[];
-  profile: string;
+  command?: string;                   // host mode
+  profile?: string;                   // restricted mode
   arguments?: string[];
   environment: Array<{
     name: string;
@@ -822,13 +871,14 @@ type ConsumeIntoProcessEnvInput = LinkSource & {
 ```
 
 - `environment` is repeatable, matching CLI `--set-env` selectors.
-- Names must be valid, profile-allowlisted and must not start with `WIPEME_`.
+- Names must be valid and must not start with `WIPEME_`; restricted mode also
+  requires them in the selected profile's allowlist.
 - Validate all arguments, mappings, executable and working directory before
   retrieval.
 - Retrieve once, persist recovery, decrypt locally, select blocks in document order
   and inject exact values.
-- Start from the profile's minimal inherited environment. Remove Wipe.me link and
-  passphrase source variables.
+- Host commands inherit the server environment. Restricted profiles receive only
+  their configured inherited names.
 - Child stdin is null unless a fixed profile defines a safe source. stdout and
   stderr are discarded.
 - On an accepted exit code, mandatorily wipe recovery.
@@ -869,8 +919,9 @@ interface RetryProcessEnvInput {
 }
 ```
 
-- The original profile and operation type are immutable.
-- Revised argv and block mappings must still satisfy that profile.
+- The original host command or restricted profile and operation type are immutable.
+- Revised argv and block mappings must still satisfy the active access mode and
+  original target.
 - Block values remain zero-based document block indexes, not indexes among only
   text-bearing blocks.
 - No server retrieval or new secret generation occurs.
@@ -931,7 +982,7 @@ The following current CLI features are deliberately absent or transformed:
 | Message plaintext from stdin or `--message` | Omitted; stdin is MCP transport and literal text would already be model-visible |
 | `read` to stdout and `read --json` | Omitted; only file materialization is exposed |
 | `--passphrase-stdin` and prompt | Omitted; MCP is non-interactive |
-| Arbitrary `exec -- command` | Replaced by process profiles |
+| Arbitrary `exec -- command` | Direct argv `command` in host mode; configured `profile` in restricted mode |
 | Child stdin/stdout/stderr inheritance | Omitted because MCP owns protocol streams and plaintext must not leak |
 | `--copy` | Omitted; server processes must not mutate a desktop clipboard |
 | Terminal `--qr` / `--qr-big` / `--qr-invert` | Replaced by optional normal inline PNG only |
@@ -991,6 +1042,7 @@ path_outside_allowed_root
 profile_unknown
 profile_argument_rejected
 profile_unavailable
+command_unavailable
 producer_failed
 output_limit_exceeded
 recovery_unknown
@@ -1029,10 +1081,11 @@ mcp:
   process_profiles: {}
 ```
 
-Host mode still requires absolute paths, regular input files, existing output
+Host mode still requires absolute paths for file operations, regular input files, existing output
 parents, no-overwrite destinations, safe attachment names, private permissions,
-and protected recovery. It does not turn process tools into arbitrary command
-execution: producer and consumer process profiles remain mandatory.
+and protected recovery. Process tools accept direct executable names or paths plus
+argv arrays; the MCP host's own authorization boundary governs them. Wipe.me never
+inserts a shell, never returns consumer output, and encrypts producer output.
 
 `restricted` adds Wipe.me-managed filesystem and environment allowlists:
 
@@ -1066,7 +1119,8 @@ The command-line `--access host|restricted` value overrides
 the corresponding source or destination. In host mode, these allowlist fields are
 not consulted.
 Use `wipeme mcp --show-policy` to verify the fully resolved non-secret policy before
-registering or restarting the server in an MCP host.
+registering or restarting the server in an MCP host. Its
+`direct_process_commands` field is true only in host mode.
 
 Environment overrides for MCP policy should be minimal and explicitly documented.
 Do not accept serialized process profiles or allowed roots from a single environment
@@ -1089,7 +1143,7 @@ internal/core typed operations
   ├── delete
   ├── file materialization
   ├── environment-file encoders
-  ├── process profiles/execution
+  ├── host commands/restricted profiles/execution
   └── recovery lifecycle
           │
           ▼
@@ -1115,9 +1169,9 @@ Implementation is complete only when all of the following pass:
    cleanup, duplicate filenames and path traversal.
 9. Tests cover every password preset, custom alphabets and class requirements by
    reusing existing password tests.
-10. Tests cover process profile validation before retrieval, argv execution without
-    a shell, minimal environment inheritance, protected names, timeout, signal,
-    launch failure, nonzero exit and accepted exit codes.
+10. Tests cover host commands and restricted profile validation before retrieval,
+    argv execution without an implicit shell, environment handling, protected
+    names, timeout, signal, launch failure, nonzero exit and accepted exit codes.
 11. Tests prove failed process, file and environment-file operations retain
     recovery, retries make no second GET, and successful retries wipe recovery.
 12. Tests prove generated-secret retries reuse the exact same secret and release the
@@ -1130,9 +1184,10 @@ Implementation is complete only when all of the following pass:
 16. Tests cover recovery TTL, attempt exhaustion, startup cleanup, corrupt records,
     permissions and concurrent handle use.
 17. Race tests ensure one recovery handle cannot execute concurrently.
-18. Tests prove host mode uses OS-visible absolute paths and inherited environment
-    without Wipe.me allowlists, while restricted mode denies access outside its
-    configured roots and environment allowlists.
+18. Tests prove host mode uses OS-visible paths, direct commands, and inherited
+    environment without Wipe.me allowlists or profiles, while restricted mode
+    denies access outside its configured roots, environment allowlists, and process
+    profiles.
 19. Tests prove `--access` overrides YAML and invalid access modes fail at startup.
 20. Run `gofmt`, `go test ./...`, `go test -race ./...` and `go vet ./...`.
 21. Run MCP protocol conformance/inspector tests against the built binary.

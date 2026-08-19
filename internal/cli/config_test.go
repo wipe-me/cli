@@ -110,6 +110,25 @@ func TestConfigRequiresExplicitFileToExist(t *testing.T) {
 	}
 }
 
+func TestExplicitGeneratedPasswordLengthMustBeInRange(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, value := range []string{"-1", "0", "7", "4097"} {
+		if _, _, err := parseFlags([]string{"--length", value}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("accepted explicit length %s", value)
+		}
+	}
+	for _, value := range []string{"8", "32", "4096"} {
+		settings, _, err := parseFlags([]string{"--length", value}, &bytes.Buffer{})
+		if err != nil || settings.Length == 0 {
+			t.Fatalf("length %s: settings=%#v err=%v", value, settings, err)
+		}
+	}
+	settings, _, err := parseFlags(nil, &bytes.Buffer{})
+	if err != nil || settings.Length != 32 {
+		t.Fatalf("omitted length: settings=%#v err=%v", settings, err)
+	}
+}
+
 func writeTestConfig(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

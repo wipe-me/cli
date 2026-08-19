@@ -33,7 +33,7 @@ type MCPCreationControls struct {
 
 type generateSecretInput struct {
 	MCPCreationControls
-	Length          int      `json:"length,omitempty"`
+	Length          *int     `json:"length,omitempty" jsonschema:"Generated password length from 8 through 4096; omit for 32."`
 	Chars           string   `json:"chars,omitempty"`
 	Alphabet        string   `json:"alphabet,omitempty"`
 	NoRequireEach   bool     `json:"no_require_each,omitempty"`
@@ -92,9 +92,9 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 		Description: "Generate a password internally, encrypt it into a one-time Wipe.me message, and return only its private link. The plaintext secret is never returned.",
 		Annotations: annotations,
 	}, func(ctx context.Context, request *mcpsdk.CallToolRequest, input generateSecretInput) (*mcpsdk.CallToolResult, mcpCreationResult, error) {
-		length := input.Length
-		if length == 0 {
-			length = passwordgen.DefaultLength
+		length, err := resolveMCPGeneratedLength(input.Length)
+		if err != nil {
+			return nil, mcpCreationResult{}, err
 		}
 		generated, err := passwordgen.Generate(passwordgen.Options{Length: length, Preset: input.Chars, Alphabet: input.Alphabet, NoRequireEach: input.NoRequireEach})
 		if err != nil {
@@ -201,6 +201,16 @@ func registerMCPCreationTools(server *mcpsdk.Server, policy mcpPolicy, settings 
 	})
 
 	registerMCPProducerTool(server, policy, settings)
+}
+
+func resolveMCPGeneratedLength(value *int) (int, error) {
+	if value == nil {
+		return passwordgen.DefaultLength, nil
+	}
+	if *value < passwordgen.MinLength || *value > passwordgen.MaxLength {
+		return 0, fmt.Errorf("invalid_arguments: length must be between %d and %d", passwordgen.MinLength, passwordgen.MaxLength)
+	}
+	return *value, nil
 }
 
 func createMCPMessage(ctx context.Context, policy mcpPolicy, settings config, request mcpCreateRequest) (result mcpCreationResult, png []byte, err error) {

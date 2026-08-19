@@ -29,6 +29,8 @@ const (
 	exitRetrieve   = 6
 	exitOutput     = 8
 	exitChild      = 9
+
+	defaultPassphraseAttempts = 5
 )
 
 type cliError struct {
@@ -63,7 +65,7 @@ func runAccess(command string, args []string, stdin io.Reader, stdout, stderr io
 	f.StringVar(&o.passFile, "passphrase-file", "", "read a passphrase candidate from a file")
 	f.BoolVar(&o.passStdin, "passphrase-stdin", false, "read a passphrase candidate from stdin")
 	f.StringVar(&o.passEnv, "passphrase-env", "", "read a passphrase candidate from an environment variable")
-	f.BoolVar(&o.prompt, "passphrase-prompt", false, "include secure terminal prompting")
+	f.BoolVar(&o.prompt, "passphrase-prompt", false, "allow secure terminal fallback within five total passphrase attempts")
 	f.BoolVar(&o.nonInteractive, "non-interactive", envTruthy("WIPEME_NON_INTERACTIVE"), "never prompt")
 	if command == "read" {
 		f.BoolVar(&o.json, "json", false, "print structured decrypted JSON")
@@ -134,10 +136,9 @@ func runAccess(command string, args []string, stdin io.Reader, stdout, stderr io
 	if err != nil {
 		return fail(exitRetrieve, "message retrieval failed: %v", sanitizeAPIError(err))
 	}
-	result, err := decryptCandidates(retrieved.Envelope, parsed, candidates)
-	if err != nil && !o.nonInteractive && (o.prompt || isTerminal(stdin)) {
-		result, err = promptDecrypt(retrieved.Envelope, parsed)
-	}
+	defer wipe(retrieved.Envelope)
+	allowPrompt := parsed.CustomPassphrase && !o.nonInteractive && (o.prompt || isTerminal(stdin))
+	result, err := decryptWithPassphraseFallback(retrieved.Envelope, parsed, candidates, allowPrompt, readTTYPassphrase)
 	if err != nil {
 		return fail(exitDecrypt, "available credentials did not decrypt the message")
 	}
@@ -280,27 +281,37 @@ func decryptCandidates(envelope []byte, link wipeme.ApplicationLink, c []string)
 	}
 	return wipeme.DecryptResult{}, errors.New("no candidate")
 }
-func promptDecrypt(envelope []byte, link wipeme.ApplicationLink) (wipeme.DecryptResult, error) {
-	for i := 0; i < 3; i++ {
-		candidate, e := readTTYPassphrase()
+
+type passphrasePrompt func(attempt, maximum int) (string, error)
+
+func decryptWithPassphraseFallback(envelope []byte, link wipeme.ApplicationLink, candidates []string, allowPrompt bool, prompt passphrasePrompt) (wipeme.DecryptResult, error) {
+	if len(candidates) > defaultPassphraseAttempts {
+		candidates = candidates[:defaultPassphraseAttempts]
+	}
+	result, err := decryptCandidates(envelope, link, candidates)
+	if err == nil || !allowPrompt || !link.CustomPassphrase || len(candidates) >= defaultPassphraseAttempts {
+		return result, err
+	}
+	for attempt := len(candidates) + 1; attempt <= defaultPassphraseAttempts; attempt++ {
+		candidate, e := prompt(attempt, defaultPassphraseAttempts)
 		if e != nil {
 			return wipeme.DecryptResult{}, e
 		}
-		r, e := decryptCandidates(envelope, link, []string{candidate})
+		result, e = decryptCandidates(envelope, link, []string{candidate})
 		candidate = ""
 		if e == nil {
-			return r, nil
+			return result, nil
 		}
 	}
 	return wipeme.DecryptResult{}, errors.New("failed")
 }
-func readTTYPassphrase() (string, error) {
+func readTTYPassphrase(attempt, maximum int) (string, error) {
 	tty, e := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if e != nil {
 		return "", e
 	}
 	defer tty.Close()
-	fmt.Fprint(tty, "Passphrase: ")
+	fmt.Fprintf(tty, "Passphrase (attempt %d/%d): ", attempt, maximum)
 	b, e := term.ReadPassword(int(tty.Fd()))
 	fmt.Fprintln(tty)
 	if e != nil {

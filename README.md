@@ -52,7 +52,7 @@ wipeme exec --non-interactive --link-file /run/secrets/wipeme-link \
   --set-env STRIPE_API_KEY -- stripe customers list
 ```
 
-Available passphrases are tried locally in this order: fragment, `--passphrase-file`, `--passphrase-stdin`, `--passphrase-env`, `WIPEME_PASSPHRASE`, then up to three hidden terminal prompts. The encrypted message is retrieved only once. Prefer file or environment sources for automation; `--passphrase-stdin` is intentionally rejected for `exec` because it conflicts with child stdin.
+Available passphrases are tried locally in this order: fragment, `--passphrase-file`, `--passphrase-stdin`, `--passphrase-env`, `WIPEME_PASSPHRASE`, then hidden terminal fallback for manual-passphrase links. The encrypted message is retrieved only once and retained in memory only for that command. Interactive manual-passphrase access permits five total attempts, counting file, stdin, and environment candidates before prompts; a bad environment value therefore falls back to a hidden prompt. `--non-interactive` and MCP never prompt. Prefer file or environment sources for automation; `--passphrase-stdin` is intentionally rejected for `exec` because it conflicts with child stdin.
 
 `read` consumes the one-time server copy before local decryption, matching the current service protocol. It intentionally exposes selected plaintext on stdout. Use `--output`, `--output-dir`, or `--json` when appropriate; secret files are created with mode 0600 and are never overwritten.
 
@@ -102,13 +102,13 @@ The MCP server exposes these tools:
 | `generate_secret_into_env_file` | Generate, upload, and write the same secret to an environment file; release the link only after success |
 | `create_from_files` | Encrypt a message file and attachments permitted by the active access policy |
 | `create_from_env` | Encrypt server environment values permitted by the active access policy |
-| `create_from_process_output` | Encrypt stdout from an approved producer profile |
+| `create_from_process_output` | Encrypt stdout from a direct host command or restricted producer profile |
 | `consume_into_env_file` | Consume selected text blocks into a private environment file |
 | `retry_into_env_file` | Retry consumed or generated environment-file output without another retrieval or generation |
 | `consume_into_files` | Consume into a new mode-0700 directory, with an optional custom message filename |
 | `retry_into_files` | Retry protected file output and optionally revise the message filename without another retrieval |
-| `consume_into_process_env` | Consume and inject selected blocks into an approved process |
-| `generate_secret_into_process_env` | Generate, upload, and inject the same secret into an approved process; release the link only after success |
+| `consume_into_process_env` | Consume and inject selected blocks into a direct host command or restricted profile |
+| `generate_secret_into_process_env` | Generate, upload, and inject the same secret into a direct host command or restricted profile; release the link only after success |
 | `retry_process_env` | Retry a process operation without retrieving or generating again |
 | `forget_recovery` | Abandon recovery, deleting an unreleased generated message first |
 | `delete_message` | Delete a message using its private capability |
@@ -255,6 +255,12 @@ mcp:
 
 `host` is the built-in default, so that mapping may be omitted. A command-line
 `--access host|restricted` value overrides `mcp.access_mode` for that server run.
+In host mode, process tools accept `command` plus an argv `arguments` array and run
+it directly under the desktop host's OS/container/sandbox and approval policy; no
+Wipe.me process profile is required and no shell is inserted. Restricted mode
+rejects `command` and requires a configured `profile`. Use
+`wipeme mcp --show-policy` and check `direct_process_commands` to confirm the active
+behavior.
 
 Configuration containing MCP policy must be owned by the current user or root and
 must not be writable by group or others. Recovery records are local, mode-0600
@@ -291,6 +297,10 @@ wipeme --generate-pass --set-env DATABASE_PASSWORD \
 ```
 
 The password is generated with OS cryptographic randomness, placed in the first ordinary text block, encrypted, and never printed. Presets are `portable`, `alnum`, `base58`, `base64url`, `hex`, `digits`, `letters`, and `ascii`; `--alphabet` supplies a validated custom printable ASCII alphabet. During child execution stdout belongs only to the child. Without `--link-file` or `--copy`, the labelled private link is written to stderr.
+
+Generated passwords default to 32 characters. Omit `--length` to use that default;
+an explicitly supplied length must be from 8 through 4096, so `--length 0` is
+rejected rather than interpreted as a default.
 
 ### Interactive
 

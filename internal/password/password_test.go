@@ -45,7 +45,7 @@ func TestBase58Exclusions(t *testing.T) {
 	}
 }
 func TestValidation(t *testing.T) {
-	for _, o := range []Options{{Length: 7, Preset: "portable"}, {Length: 32, Preset: "unknown"}, {Length: 32, Alphabet: "AAB"}, {Length: 32, Alphabet: "A "}, {Length: 32, Preset: "hex", Alphabet: "AB"}} {
+	for _, o := range []Options{{Length: MinLength - 1, Preset: "portable"}, {Length: MaxLength + 1, Preset: "portable"}, {Length: 32, Preset: "unknown"}, {Length: 32, Alphabet: "AAB"}, {Length: 32, Alphabet: "A "}, {Length: 32, Preset: "hex", Alphabet: "AB"}} {
 		if _, err := GenerateFrom(bytes.NewReader(make([]byte, 1024)), o); err == nil {
 			t.Fatalf("accepted %#v", o)
 		}

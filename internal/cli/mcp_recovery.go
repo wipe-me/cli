@@ -78,9 +78,17 @@ func (store *mcpRecoveryStore) prepare() error {
 		}
 	}
 	resolved, err := filepath.EvalSymlinks(store.directory)
-	if err != nil || filepath.Clean(resolved) != filepath.Clean(store.directory) {
+	if err != nil {
 		return errors.New("recovery_corrupt: recovery directory must not contain symlinks")
 	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil || !os.SameFile(info, resolvedInfo) {
+		return errors.New("recovery_corrupt: recovery directory is unsafe")
+	}
+	// macOS exposes /var as an alias of /private/var. The recovery directory
+	// itself must not be a symlink, but trusted aliases in its ancestors are
+	// safe once the target has been verified and retained canonically.
+	store.directory = filepath.Clean(resolved)
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || (stat.Uid != 0 && stat.Uid != uint32(os.Geteuid())) {
 		return errors.New("recovery_corrupt: recovery directory has an unsafe owner")

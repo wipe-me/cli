@@ -425,7 +425,7 @@ func validateMCPOutputFile(value string, policy mcpPolicy) (string, error) {
 		return "", nil
 	}
 	path, err := normalizeAbsolutePath(value)
-	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(path, policy.allowedWriteRoots)) {
+	if err != nil {
 		return "", errors.New("path_outside_allowed_root: output path is not allowed")
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {

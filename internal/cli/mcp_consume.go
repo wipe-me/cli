@@ -249,7 +249,7 @@ func resolveMCPMessageFilename(value, format string) (string, error) {
 
 func validateMCPDestination(value string, policy mcpPolicy) (string, error) {
 	path, err := normalizeAbsolutePath(value)
-	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(path, policy.allowedWriteRoots)) {
+	if err != nil {
 		return "", errors.New("path_outside_allowed_root: destination directory is not allowed")
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {

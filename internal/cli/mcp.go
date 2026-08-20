@@ -555,9 +555,6 @@ func validateMCPReadFileWithAccess(value string, roots []string, hostAccess bool
 	if err != nil {
 		return "", errors.New("path_outside_allowed_root")
 	}
-	if !hostAccess && !pathWithinRoots(path, roots) {
-		return "", errors.New("path_outside_allowed_root")
-	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", errors.New("output_refused")

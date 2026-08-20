@@ -472,7 +472,7 @@ func mappingsToSelectors(mappings []mcpEnvironmentMapping) []mcpEnvironmentSelec
 
 func validateMCPEnvFileDestination(value string, overwrite bool, policy mcpPolicy) (string, error) {
 	path, err := normalizeAbsolutePath(value)
-	if err != nil || (policy.accessMode != mcpAccessHost && !pathWithinRoots(path, policy.allowedWriteRoots)) {
+	if err != nil {
 		return "", errors.New("path_outside_allowed_root: destination file is not allowed")
 	}
 	info, statErr := os.Lstat(path)

@@ -31,10 +31,10 @@ func TestMCPHelpAndVersionDoNotStartServer(t *testing.T) {
 		wantErr string
 	}{
 		{[]string{"mcp", "--help"}, "", "Usage: wipeme mcp [options]"},
-		{[]string{"mcp", "--version"}, "wipeme 0.3.0-alpha.1-dev\n", ""},
+		{[]string{"mcp", "--version"}, "wipeme 0.3.0-alpha.2-dev\n", ""},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := Run(test.args, bytes.NewReader(nil), &stdout, &stderr, "0.3.0-alpha.1-dev"); code != 0 {
+		if code := Run(test.args, bytes.NewReader(nil), &stdout, &stderr, "0.3.0-alpha.2-dev"); code != 0 {
 			t.Fatalf("args=%v code=%d stderr=%q", test.args, code, stderr.String())
 		}
 		if stdout.String() != test.wantOut || !strings.Contains(stderr.String(), test.wantErr) {
@@ -90,9 +90,10 @@ func TestMCPShowPolicyReportsEffectiveAccessAndExits(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	canonicalRoot := canonicalTestPath(t, root)
 	configPath := writeTestConfig(t, fmt.Sprintf("mcp:\n  access_mode: restricted\n  allowed_read_roots: [%q]\n  allowed_write_roots: [%q]\n  allowed_source_env: [API_TOKEN]\n", root, root))
 	restricted := invoke("--config", configPath, "--show-policy")
-	if restricted.AccessMode != mcpAccessRestricted || restricted.AccessSource != "configuration" || !restricted.RestrictedAllowlists || restricted.DirectProcessCommands || len(restricted.AllowedWriteRoots) != 1 || restricted.AllowedWriteRoots[0] != root || len(restricted.AllowedSourceEnv) != 1 || restricted.AllowedSourceEnv[0] != "API_TOKEN" {
+	if restricted.AccessMode != mcpAccessRestricted || restricted.AccessSource != "configuration" || !restricted.RestrictedAllowlists || restricted.DirectProcessCommands || len(restricted.AllowedWriteRoots) != 1 || restricted.AllowedWriteRoots[0] != canonicalRoot || len(restricted.AllowedSourceEnv) != 1 || restricted.AllowedSourceEnv[0] != "API_TOKEN" {
 		t.Fatalf("restricted summary=%#v", restricted)
 	}
 
@@ -277,7 +278,7 @@ func TestMCPInspectReadsOnlyAllowlistedProtectedFiles(t *testing.T) {
 	if err := os.WriteFile(path, []byte(testAutomaticLink+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	policy := mcpPolicy{allowedReadRoots: []string{root}, allowedLinkEnv: map[string]struct{}{}, allowedPassphraseEnv: map[string]struct{}{}, allowedSourceEnv: map[string]struct{}{}}
+	policy := mcpPolicy{allowedReadRoots: []string{canonicalTestPath(t, root)}, allowedLinkEnv: map[string]struct{}{}, allowedPassphraseEnv: map[string]struct{}{}, allowedSourceEnv: map[string]struct{}{}}
 	result, err := inspectPrivateLink(policy, inspectPrivateLinkInput{LinkFile: path})
 	if err != nil || !result.Valid || result.MessageID != "1K7mQ2xR8" {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -535,7 +536,7 @@ func TestMCPCreateFromFilesEncryptsMessageAndAttachments(t *testing.T) {
 		_, _ = fmt.Fprintf(writer, `{"id":%q,"created":true}`, strings.TrimPrefix(request.URL.Path, "/api/messages/"))
 	}))
 	defer server.Close()
-	policy := mcpPolicy{allowedReadRoots: []string{root}}
+	policy := mcpPolicy{allowedReadRoots: []string{canonicalTestPath(t, root)}}
 	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
 	defer cleanup()
@@ -757,7 +758,7 @@ func TestMCPConsumeIntoFilesWritesPrivateOutputsWithoutReturningPlaintext(t *tes
 
 	root := t.TempDir()
 	destination := filepath.Join(root, "consumed")
-	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"), recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
 	defer cleanup()
 	result, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
@@ -853,7 +854,7 @@ func TestMCPRetryIntoFilesDoesNotRetrieveAgain(t *testing.T) {
 	defer server.Close()
 
 	recoveryDir := filepath.Join(t.TempDir(), "recovery")
-	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
 	defer cleanup()
 	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
@@ -1010,7 +1011,7 @@ func TestMCPConsumeIntoExistingEnvironmentFilePreservesUnrelatedContent(t *testi
 		t.Fatal(err)
 	}
 	policy := mcpPolicy{
-		allowedWriteRoots: []string{root}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"),
+		allowedWriteRoots: []string{canonicalTestPath(t, root)}, recoveryDirectory: filepath.Join(t.TempDir(), "recovery"),
 		recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5,
 	}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
@@ -1038,7 +1039,7 @@ func TestMCPConsumeIntoExistingEnvironmentFilePreservesUnrelatedContent(t *testi
 
 func TestMCPEnvironmentFileFormatAutodetection(t *testing.T) {
 	root := t.TempDir()
-	policy := mcpPolicy{allowedWriteRoots: []string{root}}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}}
 	selectors := []mcpEnvironmentSelector{{Name: "PRIVATE_KEY"}}
 	for _, format := range []string{mcpEnvFormatDotenv, mcpEnvFormatDocker, mcpEnvFormatShell, mcpEnvFormatSystemd} {
 		path := filepath.Join(root, "existing-"+format+".env")
@@ -1084,7 +1085,7 @@ func TestMCPEnvironmentFileOverwriteIsExplicitAndRejectsSymlinks(t *testing.T) {
 	if err := os.WriteFile(destination, []byte("OLD=value\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	policy := mcpPolicy{allowedWriteRoots: []string{root}}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}}
 	if _, err := validateMCPEnvFileDestination(destination, false, policy); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("no-overwrite validation accepted an existing file: %v", err)
 	}
@@ -1144,7 +1145,7 @@ func TestMCPConsumeIntoEnvFileRetriesWithoutAnotherRetrieval(t *testing.T) {
 	defer server.Close()
 
 	recoveryDir := filepath.Join(t.TempDir(), "recovery")
-	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, config{APIEndpoint: server.URL})
 	defer cleanup()
 	first, err := client.CallTool(context.Background(), &mcpsdk.CallToolParams{
@@ -1213,7 +1214,7 @@ func TestMCPGenerateSecretIntoEnvFileRetriesSameSecretAndThenReleasesLink(t *tes
 	defer server.Close()
 
 	recoveryDir := filepath.Join(t.TempDir(), "recovery")
-	policy := mcpPolicy{allowedWriteRoots: []string{root}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
+	policy := mcpPolicy{allowedWriteRoots: []string{canonicalTestPath(t, root)}, recoveryDirectory: recoveryDir, recoveryTTL: 15 * time.Minute, recoveryMaxAttempts: 5}
 	settings := config{APIEndpoint: server.URL, SiteURL: "https://wipe.me", Expires: 24 * time.Hour}
 	client, cleanup := connectMCPTestClientWithConfig(t, policy, settings)
 	defer cleanup()
@@ -1604,6 +1605,44 @@ func connectMCPTestClient(t *testing.T, policy mcpPolicy) (*mcpsdk.ClientSession
 func connectMCPTestClientWithConfig(t *testing.T, policy mcpPolicy, settings config) (*mcpsdk.ClientSession, func()) {
 	client, cleanup, _ := connectMCPTestClientRuntime(t, policy, settings)
 	return client, cleanup
+}
+
+func canonicalTestPath(t *testing.T, value string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		t.Fatalf("resolve test path %q: %v", value, err)
+	}
+	return filepath.Clean(resolved)
+}
+
+func TestMCPRecoveryCanonicalizesAncestorAliasesButRejectsFinalSymlink(t *testing.T) {
+	realParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skipf("create ancestor alias: %v", err)
+	}
+	store := &mcpRecoveryStore{directory: filepath.Join(aliasParent, "recovery")}
+	if err := store.prepare(); err != nil {
+		t.Fatalf("prepare through ancestor alias: %v", err)
+	}
+	want := filepath.Join(canonicalTestPath(t, realParent), "recovery")
+	if store.directory != want {
+		t.Fatalf("canonical recovery directory=%q want=%q", store.directory, want)
+	}
+
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	finalAlias := filepath.Join(t.TempDir(), "recovery")
+	if err := os.Symlink(target, finalAlias); err != nil {
+		t.Skipf("create final alias: %v", err)
+	}
+	unsafe := &mcpRecoveryStore{directory: finalAlias}
+	if err := unsafe.prepare(); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("final recovery symlink was not rejected: %v", err)
+	}
 }
 
 func connectMCPTestClientRuntime(t *testing.T, policy mcpPolicy, settings config) (*mcpsdk.ClientSession, func(), *mcpRecoveryStore) {

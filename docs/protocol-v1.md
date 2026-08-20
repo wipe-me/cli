@@ -9,7 +9,7 @@ The canonical protocol specification is maintained by the reusable Wipe.me SDK:
 The CLI imports `github.com/wipe-me/sdk/go/wipeme` for Base58 capabilities,
 private-link parsing and formatting, encryption, deletion-key derivation, and API
 requests. Protocol changes belong in the SDK first and reach the CLI through a
-versioned SDK release. CLI `v0.3.0-alpha.1` targets Go SDK
+versioned SDK release. CLI `v0.3.0-alpha.2` targets Go SDK
 `v0.5.0-alpha.1`, including application-link parsing, compact automatic capability
 expansion, manual-passphrase derivation, retrieval, deletion, and chunk progress.
 
@@ -21,7 +21,7 @@ compact half-block renderer and prints a terminal-compatibility caption, while
 `--qr-big` selects its full-size fallback. `--qr-invert` works with either renderer;
 the two size flags are mutually exclusive.
 
-CLI `v0.3.0-alpha.1` adds an MCP adapter around the same v1 protocol and SDK. MCP
+CLI `v0.3.0-alpha.2` adds an MCP adapter around the same v1 protocol and SDK. MCP
 tools do not introduce new message, link, encryption, attachment, or deletion-key
 formats. Inline MCP PNG QR images encode the same already-formatted private link.
 

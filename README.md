@@ -15,7 +15,7 @@ https://wipe.me/1K7-mQ2-xR8#7YW-HMf-k9J-CB7
 > [!WARNING]
 > This is a development preview. The unified v1 envelope has not received an independent security audit and may change before the first stable release.
 
-The source tree reports `0.3.0-alpha.1-dev`; tagged builds report their exact version
+The source tree reports `0.3.0-alpha.2-dev`; tagged builds report their exact version
 through release-time linker flags.
 
 ## Usage
@@ -502,7 +502,7 @@ prerelease from `main` with Go 1.25 or newer:
 ```sh
 go install github.com/wipe-me/cli/cmd/wipeme@main
 wipeme --version
-# wipeme 0.3.0-alpha.1-dev
+# wipeme 0.3.0-alpha.2-dev
 ```
 
 Verify any downloaded release artifact against `checksums.txt` before installing it.

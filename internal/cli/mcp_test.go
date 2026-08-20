@@ -31,10 +31,10 @@ func TestMCPHelpAndVersionDoNotStartServer(t *testing.T) {
 		wantErr string
 	}{
 		{[]string{"mcp", "--help"}, "", "Usage: wipeme mcp [options]"},
-		{[]string{"mcp", "--version"}, "wipeme 0.3.0-alpha.2-dev\n", ""},
+		{[]string{"mcp", "--version"}, "wipeme 0.3.0-alpha.3-dev\n", ""},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := Run(test.args, bytes.NewReader(nil), &stdout, &stderr, "0.3.0-alpha.2-dev"); code != 0 {
+		if code := Run(test.args, bytes.NewReader(nil), &stdout, &stderr, "0.3.0-alpha.3-dev"); code != 0 {
 			t.Fatalf("args=%v code=%d stderr=%q", test.args, code, stderr.String())
 		}
 		if stdout.String() != test.wantOut || !strings.Contains(stderr.String(), test.wantErr) {

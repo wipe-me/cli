@@ -1,7 +1,7 @@
 # Wipe.me CLI MCP server v1
 
 Status: final implementation specification
-Target release: `v0.3.0-alpha.2`
+Target release: `v0.3.0-alpha.3`
 Command: `wipeme mcp`
 
 ## 1. Purpose
@@ -1201,7 +1201,7 @@ Implementation is complete only when all of the following pass:
 
 ## 28. Distribution and documentation
 
-- Target `v0.3.0-alpha.2` because MCP adds a new public interface and security model.
+- Target `v0.3.0-alpha.3` because MCP adds a new public interface and security model.
 - `wipeme --help` adds `mcp` as a command; `wipeme mcp --help` documents stdio use
   and must not enumerate sensitive configuration values.
 - README and Mintlify document MCP installation, each tool, process profiles,
